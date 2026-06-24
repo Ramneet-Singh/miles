@@ -32,7 +32,8 @@
         cmd: >
           docker run -itd --name miles
           --gpus all --network host --ipc=host --privileged
-          --ulimit memlock=-1 --shm-size {{ shm_size }}
+          --ulimit memlock=-1 --ulimit nofile=65536:65536 --ulimit stack=67108864
+          --shm-size {{ shm_size }}
           --device /dev/infiniband
           -v /cpfs01:/cpfs01
           -v {{ fork_dst }}:/root/miles
