@@ -11,11 +11,13 @@
     fork_dst: "/home/user/miles-fork"
     ssh_key: "{{ lookup('env', 'HOME') }}/.ssh/key.ed25519"   # absolute (command module won't expand ~)
   tasks:
+    # Exclude *.egg-info/: the in-container `pip install -e` (run as root) writes it
+    # into the mounted fork dir, so a user-run rsync --delete can't unlink it (rc=23).
     - name: "rsync fork -> {{ inventory_hostname }}:{{ fork_dst }}"
       ansible.builtin.command:
         cmd: >
           rsync -ai --delete
-          --exclude '.git/' --exclude '__pycache__/' --exclude '*.pyc'
+          --exclude '.git/' --exclude '__pycache__/' --exclude '*.pyc' --exclude '*.egg-info/'
           -e "ssh -i {{ ssh_key }} -o StrictHostKeyChecking=no -o ConnectTimeout=8"
           {{ fork_src }} {{ ansible_user }}@{{ ansible_host }}:{{ fork_dst }}/
       delegate_to: node0
