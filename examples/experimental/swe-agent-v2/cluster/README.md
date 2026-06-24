@@ -63,5 +63,6 @@ Teardown never touches `/cpfs01` weights/datasets — that is a manual decision.
 - **Networking:** containers run `--network host` for inter-node NCCL/Ray; RoCE env
   (`NCCL_IB_HCA`, `NCCL_IB_GID_INDEX=3`, `NCCL_SOCKET_IFNAME=eth0`) is set uniformly on
   every node — the head must match the workers or the first heavy collective fails.
-- **Idempotency:** `containers.yml`/`ray.yml` skip nodes already up; force a clean
-  recreate/restart with `-e recreate=true` / `-e restart=true`.
+- **Idempotency:** `containers.yml`/`ray.yml` skip nodes already up. To reset, recreate
+  the containers with `containers.yml -e recreate=true` then re-run `ray.yml` — in-place
+  Ray restart is unreliable (raylets can wedge on CPFS I/O), so recreate is the reset path.
