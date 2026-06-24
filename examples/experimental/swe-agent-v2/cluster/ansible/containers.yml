@@ -49,3 +49,14 @@
       ansible.builtin.command: "docker exec miles pip install -e /root/miles --no-deps --no-build-isolation -q"
       when: created is changed
       changed_when: true
+
+    # SGLang is baked into the image (not our fork), so this one-line Nemotron-H
+    # R3 fix (sglang #27110, not yet merged into our image's sglang) is applied
+    # in-container by an idempotent script. Remove both when #27110 lands upstream.
+    - name: Apply SGLang Nemotron-H R3 layer_id fix
+      ansible.builtin.command: >
+        docker exec miles python3
+        /root/miles/examples/experimental/swe-agent-v2/cluster/sglang-fixes/apply-nemotron-layer-id.py
+      when: created is changed
+      register: sglangfix
+      changed_when: "'inserted' in sglangfix.stdout"
