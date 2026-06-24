@@ -1,0 +1,50 @@
+---
+# containers.yml — create the persistent miles container on every node.
+# Mounts our fork over /root/miles and re-registers the editable install so the
+# fork's code (not the image's baked d2c771bb) is what runs.
+# Run from cluster/ansible/:  ansible-playbook containers.yml
+#   Force a clean recreate:   ansible-playbook containers.yml -e recreate=true
+- name: Bring up miles containers
+  hosts: cluster
+  gather_facts: false
+  vars:
+    miles_image: "radixark/miles:latest"
+    fork_dst: "/home/user/miles-fork"
+    shm_size: "64g"
+    net_ifname: "eth0"
+    nccl_ib_hca: "mlx5_bond_0,mlx5_bond_1,mlx5_bond_2,mlx5_bond_3,mlx5_bond_4,mlx5_bond_5,mlx5_bond_6,mlx5_bond_7"
+    nccl_ib_gid_index: 3
+    recreate: false
+  tasks:
+    - name: Remove existing miles container (when recreate=true)
+      ansible.builtin.command: docker rm -f miles
+      when: recreate | bool
+      failed_when: false
+      changed_when: true
+
+    - name: Is a miles container already present?
+      ansible.builtin.command: "docker ps -aq -f name=^miles$"
+      register: existing
+      changed_when: false
+
+    - name: Create miles container
+      ansible.builtin.command:
+        cmd: >
+          docker run -itd --name miles
+          --gpus all --network host --ipc=host --privileged
+          --ulimit memlock=-1 --shm-size {{ shm_size }}
+          --device /dev/infiniband
+          -v /cpfs01:/cpfs01
+          -v {{ fork_dst }}:/root/miles
+          -e NCCL_IB_HCA={{ nccl_ib_hca }}
+          -e NCCL_IB_GID_INDEX={{ nccl_ib_gid_index }}
+          -e NCCL_SOCKET_IFNAME={{ net_ifname }}
+          -e GLOO_SOCKET_IFNAME={{ net_ifname }}
+          {{ miles_image }} sleep infinity
+      when: existing.stdout == ""
+      register: created
+
+    - name: Re-register editable install against the mounted fork
+      ansible.builtin.command: "docker exec miles pip install -e /root/miles --no-deps --no-build-isolation -q"
+      when: created is changed
+      changed_when: true
