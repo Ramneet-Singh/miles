@@ -9,7 +9,7 @@
 - name: Start Ray head
   hosts: head
   gather_facts: false
-  vars: { ray_port: 6379, gpus_per_node: 8 }
+  vars: { ray_port: 6379, gpus_per_node: 8, ray_mem_threshold: "0.98" }
   tasks:
     - name: Is raylet already running?
       ansible.builtin.command: "docker exec miles pgrep -x raylet"
@@ -19,8 +19,12 @@
     - name: Start Ray head
       # -w /root/miles: ray jobs run in the supervisor's cwd; miles launchers
       # assume the miles root (so `python3 train.py` resolves).
+      # RAY_memory_usage_threshold: colocate (engine host-offload + optimizer
+      # cpu-offload) peaks ~95% host RAM at weight-sync; 0.98 rides the transient
+      # peak. The real fix is train/infer disaggregation (Phase B).
       ansible.builtin.command: >
-        docker exec -w /root/miles miles ray start --head
+        docker exec -w /root/miles -e RAY_memory_usage_threshold={{ ray_mem_threshold }}
+        miles ray start --head
         --node-ip-address {{ ansible_host }} --port {{ ray_port }}
         --num-gpus {{ gpus_per_node }}
       when: raylet.rc != 0
@@ -32,6 +36,7 @@
   vars:
     ray_port: 6379
     gpus_per_node: 8
+    ray_mem_threshold: "0.98"
     ray_head_ip: "{{ hostvars[groups['head'][0]].ansible_host }}"
   tasks:
     - name: Is raylet already running?
@@ -41,8 +46,10 @@
       changed_when: false
     - name: Join Ray cluster
       # -w /root/miles to match the head (actors inherit a sane cwd too).
+      # RAY_memory_usage_threshold: see head comment (ride colocate host-RAM peak).
       ansible.builtin.command: >
-        docker exec -w /root/miles miles ray start --address {{ ray_head_ip }}:{{ ray_port }}
+        docker exec -w /root/miles -e RAY_memory_usage_threshold={{ ray_mem_threshold }}
+        miles ray start --address {{ ray_head_ip }}:{{ ray_port }}
         --node-ip-address {{ ansible_host }} --num-gpus {{ gpus_per_node }}
       when: raylet.rc != 0
       changed_when: true
