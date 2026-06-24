@@ -132,6 +132,11 @@ def _build_bridge_subclass():
 
             if not os.environ.get("MILES_NEMOTRONH_KEEP_MTP"):
                 provider.mtp_num_layers = None
+                # megatron-bridge finalize() builds the MTP block from
+                # mtp_hybrid_override_pattern, which refs Symbols.MTP_SEPARATOR
+                # (absent in our baked Megatron -> AttributeError). Clear the
+                # pattern too so finalize() skips MTP entirely. (miles #1284)
+                provider.mtp_hybrid_override_pattern = None
             return provider
 
         def mapping_registry(self):
