@@ -1,0 +1,33 @@
+---
+# sync.yml — push the local miles fork to every node's local NVMe (the bind-mount
+# source for /root/miles), then re-register the editable install in any running
+# miles container so new/renamed files are importable.
+# Run from cluster/ansible/:  ansible-playbook sync.yml
+- name: Sync miles fork to all nodes
+  hosts: cluster
+  gather_facts: false
+  vars:
+    fork_src: "/home/user/cluster-testing/miles-fork/"   # trailing slash = sync contents
+    fork_dst: "/home/user/miles-fork"
+    ssh_key: "{{ lookup('env', 'HOME') }}/.ssh/key.ed25519"   # absolute (command module won't expand ~)
+  tasks:
+    - name: "rsync fork -> {{ inventory_hostname }}:{{ fork_dst }}"
+      ansible.builtin.command:
+        cmd: >
+          rsync -ai --delete
+          --exclude '.git/' --exclude '__pycache__/' --exclude '*.pyc'
+          -e "ssh -i {{ ssh_key }} -o StrictHostKeyChecking=no -o ConnectTimeout=8"
+          {{ fork_src }} {{ ansible_user }}@{{ ansible_host }}:{{ fork_dst }}/
+      delegate_to: node0
+      register: rs
+      changed_when: rs.stdout_lines | length > 0
+
+    - name: Is a miles container running here?
+      ansible.builtin.command: "docker ps -q -f name=^miles$"
+      register: cstat
+      changed_when: false
+
+    - name: Re-register editable install (only if container is up)
+      ansible.builtin.command: "docker exec miles pip install -e /root/miles --no-deps -q"
+      when: cstat.stdout != ""
+      changed_when: true
