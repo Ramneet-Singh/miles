@@ -1,0 +1,41 @@
+---
+# teardown.yml — stop the cluster. Default: stop Ray + remove the miles container
+# on all nodes (frees GPUs; leaves image, synced fork, and /cpfs01 data intact).
+# Deliberately does NOT delete weights/datasets on /cpfs01 — that is a manual,
+# one-off decision, not something a routine playbook should be able to do.
+# Run from cluster/ansible/:  ansible-playbook teardown.yml
+#   Also remove the base image:   ansible-playbook teardown.yml -e remove_image=true
+#   Also remove the synced fork:  ansible-playbook teardown.yml -e remove_fork=true
+- name: Tear down the cluster
+  hosts: cluster
+  gather_facts: false
+  vars:
+    miles_image: "radixark/miles:latest"
+    fork_dst: "/home/user/miles-fork"
+    remove_image: false
+    remove_fork: false
+  tasks:
+    - name: Stop Ray (best effort)
+      ansible.builtin.command: "docker exec miles ray stop"
+      register: ray_stop
+      failed_when: false
+      changed_when: "'Stopped' in ray_stop.stdout"
+
+    - name: Remove miles container
+      ansible.builtin.command: "docker rm -f miles"
+      register: rm_c
+      failed_when: false
+      changed_when: "'miles' in rm_c.stdout"
+
+    - name: Remove base image (when remove_image=true)
+      ansible.builtin.command: "docker rmi {{ miles_image }}"
+      register: rmi
+      when: remove_image | bool
+      failed_when: false
+      changed_when: "rmi.rc == 0"
+
+    - name: Remove synced fork (when remove_fork=true)
+      ansible.builtin.file:
+        path: "{{ fork_dst }}"
+        state: absent
+      when: remove_fork | bool
