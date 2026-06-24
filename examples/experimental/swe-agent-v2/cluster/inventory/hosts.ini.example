@@ -1,0 +1,23 @@
+# Copy to hosts.ini and fill in real IPs. node0 is the Ray head AND Ansible control node.
+[head]
+node0 ansible_host=10.0.0.10 node_rank=0 ansible_connection=local
+
+[workers]
+node1 ansible_host=10.0.0.11 node_rank=1
+node2 ansible_host=10.0.0.12 node_rank=2
+node3 ansible_host=10.0.0.13 node_rank=3
+node4 ansible_host=10.0.0.14 node_rank=4
+node5 ansible_host=10.0.0.15 node_rank=5
+node6 ansible_host=10.0.0.16 node_rank=6
+node7 ansible_host=10.0.0.17 node_rank=7
+
+[cluster:children]
+head
+workers
+
+[cluster:vars]
+ansible_user=user
+# Interpreter used ON each target node to run modules, NOT the control venv.
+ansible_python_interpreter=/usr/bin/python3
+ansible_ssh_private_key_file=~/.ssh/key.ed25519
+ansible_ssh_common_args=-o StrictHostKeyChecking=no -o ConnectTimeout=8

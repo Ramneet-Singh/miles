@@ -1,0 +1,5 @@
+# Real cluster inventory (actual IPs + ssh key path) — local only, never committed.
+inventory/hosts.ini
+# Local secrets / logs
+*.secret
+*.log
