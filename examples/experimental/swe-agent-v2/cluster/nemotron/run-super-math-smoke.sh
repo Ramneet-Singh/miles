@@ -111,7 +111,8 @@ RUNTIME_ENV_JSON="{
     \"NCCL_IB_HCA\": \"mlx5_bond_0,mlx5_bond_1,mlx5_bond_2,mlx5_bond_3,mlx5_bond_4,mlx5_bond_5,mlx5_bond_6,mlx5_bond_7\",
     \"NCCL_IB_GID_INDEX\": \"3\",
     \"NCCL_SOCKET_IFNAME\": \"eth0\",
-    \"GLOO_SOCKET_IFNAME\": \"eth0\"
+    \"GLOO_SOCKET_IFNAME\": \"eth0\",
+    \"WANDB_DIR\": \"/root/wandb\"
   }
 }"
 
