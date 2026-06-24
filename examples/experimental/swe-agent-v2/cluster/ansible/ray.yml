@@ -1,0 +1,53 @@
+---
+# ray.yml — start the Ray cluster across all miles containers.
+# Head (node0) starts first, then workers join. Idempotent: skips a node whose
+# raylet is already running.
+# Run from cluster/ansible/:  ansible-playbook ray.yml
+#   Restart clean:            ansible-playbook ray.yml -e restart=true
+- name: Start Ray head
+  hosts: head
+  gather_facts: false
+  vars: { ray_port: 6379, gpus_per_node: 8 }
+  tasks:
+    - name: Stop Ray (when restart=true)
+      ansible.builtin.command: "docker exec miles ray stop"
+      when: restart | default(false) | bool
+      failed_when: false
+      changed_when: true
+    - name: Is raylet already running?
+      ansible.builtin.command: "docker exec miles pgrep -x raylet"
+      register: raylet
+      failed_when: false
+      changed_when: false
+    - name: Start Ray head
+      ansible.builtin.command: >
+        docker exec miles ray start --head
+        --node-ip-address {{ ansible_host }} --port {{ ray_port }}
+        --num-gpus {{ gpus_per_node }}
+      when: raylet.rc != 0
+      changed_when: true
+
+- name: Start Ray workers
+  hosts: workers
+  gather_facts: false
+  vars:
+    ray_port: 6379
+    gpus_per_node: 8
+    ray_head_ip: "{{ hostvars[groups['head'][0]].ansible_host }}"
+  tasks:
+    - name: Stop Ray (when restart=true)
+      ansible.builtin.command: "docker exec miles ray stop"
+      when: restart | default(false) | bool
+      failed_when: false
+      changed_when: true
+    - name: Is raylet already running?
+      ansible.builtin.command: "docker exec miles pgrep -x raylet"
+      register: raylet
+      failed_when: false
+      changed_when: false
+    - name: Join Ray cluster
+      ansible.builtin.command: >
+        docker exec miles ray start --address {{ ray_head_ip }}:{{ ray_port }}
+        --node-ip-address {{ ansible_host }} --num-gpus {{ gpus_per_node }}
+      when: raylet.rc != 0
+      changed_when: true
