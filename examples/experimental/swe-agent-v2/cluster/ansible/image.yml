@@ -1,0 +1,22 @@
+---
+# image.yml — pull the miles base image on all cluster nodes.
+# Run from cluster/ansible/:  ansible-playbook image.yml
+- name: Pull miles base image on all nodes
+  hosts: cluster
+  gather_facts: false
+  vars:
+    miles_image: "radixark/miles:latest"
+  tasks:
+    - name: "Pull {{ miles_image }}"
+      ansible.builtin.command: "docker pull {{ miles_image }}"
+      register: pull
+      changed_when: "'Image is up to date' not in pull.stdout"
+
+    - name: Show resulting image
+      ansible.builtin.command: "docker images {{ miles_image }}"
+      register: img
+      changed_when: false
+
+    - name: Report
+      ansible.builtin.debug:
+        var: img.stdout_lines
