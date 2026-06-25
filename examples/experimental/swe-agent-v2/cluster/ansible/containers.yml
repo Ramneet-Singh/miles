@@ -14,6 +14,12 @@
     net_ifname: "eth0"
     nccl_ib_hca: "mlx5_bond_0,mlx5_bond_1,mlx5_bond_2,mlx5_bond_3,mlx5_bond_4,mlx5_bond_5,mlx5_bond_6,mlx5_bond_7"
     nccl_ib_gid_index: 3
+    # Put HF's trust_remote_code dynamic-module cache on shared CPFS instead of the
+    # container-local default (~/.cache/huggingface/modules). The cache then survives
+    # container recreates, so it is warmed exactly once (prewarm-model.yml) and never
+    # cold-starts again — killing the concurrent-first-import race that corrupts the
+    # generated configuration_*.py when N ranks populate a cold cache at once.
+    hf_modules_cache: "/cpfs01/hf-modules-cache"
     recreate: false
   tasks:
     - name: Remove existing miles container (when recreate=true)
@@ -41,6 +47,7 @@
           -e NCCL_IB_GID_INDEX={{ nccl_ib_gid_index }}
           -e NCCL_SOCKET_IFNAME={{ net_ifname }}
           -e GLOO_SOCKET_IFNAME={{ net_ifname }}
+          -e HF_MODULES_CACHE={{ hf_modules_cache }}
           {{ miles_image }} sleep infinity
       when: existing.stdout == ""
       register: created

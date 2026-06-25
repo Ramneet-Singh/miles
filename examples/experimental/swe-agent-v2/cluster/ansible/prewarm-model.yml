@@ -1,0 +1,35 @@
+---
+# prewarm-model.yml — warm HF's trust_remote_code dynamic-module cache ONCE.
+# Models with custom code (trust_remote_code) make transformers generate
+# transformers_modules/<model>/<hash>/configuration_*.py on first load. When many
+# ranks populate a COLD cache concurrently, one rank imports a half-written file
+# (AttributeError: module ... has no attribute 'NemotronHConfig'). containers.yml
+# points HF_MODULES_CACHE at shared CPFS, so warming it single-threaded here once is
+# enough for every node and survives container recreates.
+# Run from cluster/ansible/ (after containers are up):
+#   ansible-playbook prewarm-model.yml
+#   ansible-playbook prewarm-model.yml -e model_dir=/cpfs01/models/<other-model>
+- name: Warm HF dynamic-module cache (single-threaded across the cluster)
+  hosts: cluster
+  gather_facts: false
+  # Serialize: the first host populates the shared CPFS cache, the rest are cache
+  # hits — so there is never a concurrent first-write (the race we are preventing).
+  serial: 1
+  vars:
+    model_dir: "/cpfs01/models/NVIDIA-Nemotron-3-Super-120B-A12B-BF16"
+  tasks:
+    - name: Is a miles container running here?
+      ansible.builtin.command: "docker ps -q -f name=^miles$"
+      register: cstat
+      changed_when: false
+
+    - name: "Warm transformers_modules for {{ model_dir }}"
+      ansible.builtin.command:
+        cmd: >
+          docker exec miles python3 -c
+          "from transformers import AutoConfig;
+          c = AutoConfig.from_pretrained('{{ model_dir }}', trust_remote_code=True);
+          print('warmed', type(c).__name__)"
+      when: cstat.stdout != ""
+      register: warm
+      changed_when: "'warmed' in warm.stdout"
