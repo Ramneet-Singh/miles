@@ -53,9 +53,15 @@ ASYNC_ARGS=(
    # Bound how stale a rollout may be: groups whose oldest weight version is >2 behind
    # the engine's current version are recycled back to the buffer instead of trained on.
    --max-weight-staleness 2
-   # Broadcast fresh weights to the rollout engines every training step (max freshness).
-   # This is the freshness<->overlap knob; raise it for looser coupling.
-   --update-weights-interval 1
+   # Broadcast fresh weights to the rollout engines every 4 training steps. Less
+   # frequent pause+flush (the weight-update barrier), more genuine async overlap,
+   # and makes the staleness bound above actually engage. (interval 1 = barely async.)
+   --update-weights-interval 4
+   # Abort in-flight + queued generations at the weight-update barrier. In fully-async
+   # the background worker keeps the engine queue full, so the default "retract" leaves
+   # requests pending and flush_cache times out (400: pending requests). "abort" clears
+   # them so the cache flushes; aborted prompts are re-generated with fresh weights.
+   --pause-generation-mode abort
 )
 
 PERF_ARGS=(
@@ -92,7 +98,10 @@ OPTIMIZER_ARGS=(
 SGLANG_ARGS=(
    --rollout-num-gpus-per-engine 8     # TP8 engines; 32 rollout GPUs -> 4 engines
    --sglang-mem-fraction-static 0.7
-   --use-miles-router
+   # Default sglang_router (Rust) — not --use-miles-router. The Python miles router
+   # threw 500/ReadError churn under the continuous fully-async load, leaving
+   # requests pending so the weight-update flush_cache timed out. The Rust router is
+   # what the proven fully-async example uses and is independent of R3 below.
    --use-rollout-routing-replay        # sigmoid-MoE logprob alignment (doc 5.3)
 )
 
