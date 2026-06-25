@@ -40,12 +40,12 @@ ROLLOUT_ARGS=(
    --input-key prompt --label-key label
    --apply-chat-template --rollout-shuffle
    --rm-type deepscaler
-   --num-rollout 10              # enough steps for staleness/TIS to engage
-   --rollout-batch-size 32
-   --n-samples-per-prompt 4
-   --rollout-max-response-len 1024
+   --num-rollout 20              # longer horizon to look for reward hill-climb
+   --rollout-batch-size 16       # 16 distinct prompts/step -> lower per-step reward variance
+   --n-samples-per-prompt 16     # 16 samples/prompt -> stronger GRPO within-group advantage
+   --rollout-max-response-len 8192   # let the thinking model finish + reach \boxed{} (1024 truncated ~92%)
    --rollout-temperature 1
-   --global-batch-size 128       # = 32 prompts x 4 samples / 1 step
+   --global-batch-size 256       # = 16 prompts x 16 samples / 1 step
    --balance-data
 )
 
@@ -75,7 +75,7 @@ PERF_ARGS=(
    --recompute-method uniform
    --recompute-num-layers 1
    --use-dynamic-batch-size
-   --max-tokens-per-gpu 1024
+   --max-tokens-per-gpu 9216    # cover one full ~8.7k-token sequence (prompt + 8192 response) per microbatch
    --log-probs-chunk-size 128
 )
 
@@ -90,9 +90,11 @@ OPTIMIZER_ARGS=(
    --optimizer adam --lr 1e-6 --lr-decay-style constant --weight-decay 0.1
    --adam-beta1 0.9 --adam-beta2 0.98
    --use-precision-aware-optimizer
-   # No --optimizer-cpu-offload: disaggregated training owns the full GPU (no sglang
-   # sharing), so the distributed-optimizer states (~45GB/GPU at DP4) fit on-device.
-   # Re-add it only if training GPU-OOMs.
+   # Offload optimizer states to host RAM. Fine without it at 1024-token responses,
+   # but 8192-token sequences make activations ~9x larger and train() GPU-OOM'd
+   # (123/140GB). Offloading the optimizer (~tens of GB/GPU) frees that headroom;
+   # the training node has 2TB host RAM so the cost is trivial in disaggregated mode.
+   --optimizer-cpu-offload --overlap-cpu-optimizer-d2h-h2d
 )
 
 SGLANG_ARGS=(
