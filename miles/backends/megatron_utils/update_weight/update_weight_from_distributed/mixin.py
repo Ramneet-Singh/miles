@@ -41,7 +41,8 @@ class DistBucketedWeightUpdateMixin:
         self.model_name: str (for HF conversion).
         self.quantization_config: dict | None.
         self._is_source: bool (whether it's the rank broadcasting weights after `all_gather`).
-        self._is_lora_source: bool (the single rank holding the full adapter; for LoRA sync).
+        self._is_global_source: bool (the single global source rank DP=TP=PP=0; for
+            the LoRA adapter sync and the bridge-based base-weight sync).
         self.weight_version: int.
         self.rollout_engines: Sequence[ActorHandle]. engines of rollout side.
         self._group_name: str. Identifier shown in the tqdm progress bar.
@@ -88,6 +89,17 @@ class DistBucketedWeightUpdateMixin:
                 quantization_config=quantization_config,
                 is_lora=True,
             )
+
+    def _sync_base_weights(
+        self, update_func: Callable[[list[tuple[str, torch.Tensor]], tqdm | None], None]
+    ) -> None:
+        """Sync the full base weights to the rollout engines via bucketed TP/EP
+        all-gather + per-architecture ``convert_to_hf``. Subclasses may override to
+        use a different conversion/transport (e.g. the bridge-based exporter)."""
+        pbar = tqdm(desc=f"[{self._group_name}] Update weights", total=0) if self._is_source else None
+        self._gather_and_update_non_expert_weights(update_func, pbar)
+        dist.barrier(group=get_gloo_group())
+        self._gather_and_update_expert_weights(update_func, pbar)
 
     def _gather_and_update_non_expert_weights(
         self,
@@ -245,7 +257,7 @@ class DistBucketedWeightUpdateMixin:
                 "the Megatron-Bridge or SGLang version is incompatible."
             )
 
-        if not self._is_lora_source:
+        if not self._is_global_source:
             return
 
         if not any(is_lora_weight_name(n) for n, _ in accumulated_named_tensors):
@@ -319,11 +331,7 @@ class DistBucketedWeightUpdateMixin:
             #   full-param RL: base weights change every step -> always sync.
             #   LoRA RL: base is frozen -> only sync once, on the first iteration.
             if not (self.is_lora and self._lora_base_synced):
-                pbar = tqdm(desc=f"[{self._group_name}] Update weights", total=0) if self._is_source else None
-
-                self._gather_and_update_non_expert_weights(self._update_weight_implementation, pbar)
-                dist.barrier(group=get_gloo_group())
-                self._gather_and_update_expert_weights(self._update_weight_implementation, pbar)
+                self._sync_base_weights(self._update_weight_implementation)
                 dist.barrier(group=get_gloo_group())
 
             # LoRA adapter weights: every iteration.

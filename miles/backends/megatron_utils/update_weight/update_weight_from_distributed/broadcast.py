@@ -15,6 +15,7 @@ from miles.utils.distributed_utils import init_process_group
 
 from ...lora_utils import LORA_ADAPTER_NAME
 from ..common import _check_weight_sync_results
+from ..hf_weight_iterator_base import HfWeightIteratorBase
 from .mixin import DistBucketedWeightUpdateMixin
 
 
@@ -41,6 +42,7 @@ class UpdateWeightFromDistributed(DistBucketedWeightUpdateMixin):
         self.model = model
         self.model_name = model_name
         self.quantization_config = quantization_config
+        self.weights_getter = weights_getter
         self.weight_version = 0
         self._model_update_groups = None
         self._init_lora(
@@ -50,6 +52,21 @@ class UpdateWeightFromDistributed(DistBucketedWeightUpdateMixin):
             quantization_config=quantization_config,
             is_lora=is_lora,
         )
+        # Bridge-based base-weight sync. The hand-written convert_to_hf dispatch
+        # (_convert_to_hf_core) doesn't cover every architecture (e.g. Nemotron-H).
+        # In bridge mode we instead export full HF weights via AutoBridge — which
+        # gathers all parallelism and yields complete tensors on every rank — and
+        # broadcast them from a single global source. LoRA keeps its existing path
+        # (its adapter sync already uses the bridge), so it is excluded here.
+        self._bridge_base_sync = args.megatron_to_hf_mode == "bridge" and not is_lora
+        if self._bridge_base_sync:
+            self._hf_weight_iterator = HfWeightIteratorBase.create(
+                args=args,
+                model=model,
+                model_name=model_name,
+                quantization_config=quantization_config,
+                is_lora=False,
+            )
 
     def connect_rollout_engines(
         self,
@@ -64,6 +81,21 @@ class UpdateWeightFromDistributed(DistBucketedWeightUpdateMixin):
         self.rollout_engines = rollout_engines
         self.rollout_engine_lock = rollout_engine_lock
         self._engine_gpu_counts = engine_gpu_counts
+
+        if self._bridge_base_sync:
+            # The bridge yields the full model (all PP/TP/EP gathered) on every
+            # rank, so one global source broadcasts everything through a single
+            # NCCL group — no per-PP-stage groups needed.
+            self._group_name = "miles"
+            if self._is_global_source:
+                if (g := self._model_update_groups) is not None:
+                    disconnect_rollout_engines_from_distributed(
+                        self.args, self._group_name, g, self.rollout_engines
+                    )
+                self._model_update_groups = connect_rollout_engines_from_distributed(
+                    self.args, self._group_name, rollout_engines, engine_gpu_counts=engine_gpu_counts
+                )
+            return
 
         # For TP:
         #   1. AllGather parameters to rank 0
@@ -85,11 +117,32 @@ class UpdateWeightFromDistributed(DistBucketedWeightUpdateMixin):
         return get_parallel_state().intra_dp_cp.rank == 0 and get_parallel_state().tp.rank == 0
 
     @property
-    def _is_lora_source(self) -> bool:
-        """The single rank holding the full adapter (DP=TP=PP=0). At PP=1 (enforced
-        for LoRA) this coincides with ``_is_source``."""
+    def _is_global_source(self) -> bool:
+        """The single global source rank (DP=TP=PP=0). Used for the LoRA adapter
+        sync and for the bridge-based base-weight sync — both broadcast a complete
+        (all-PP-stages) export from one rank. At PP=1 (enforced for LoRA) this
+        coincides with ``_is_source``."""
         ps = get_parallel_state()
         return ps.pp.rank == 0 and ps.tp.rank == 0 and ps.intra_dp_cp.rank == 0
+
+    def _sync_base_weights(
+        self, update_func: Callable[[list[tuple[str, torch.Tensor]], tqdm | None], None]
+    ) -> None:
+        """Bridge mode: export the full base weights and broadcast from the single
+        global source. ``export_hf_weights`` gathers all parallelism and yields
+        complete HF tensors on every rank, so every rank must iterate (to drive the
+        gather collectives) while only the global source transmits. Falls back to the
+        mixin's per-architecture convert_to_hf gather when not in bridge mode."""
+        if not self._bridge_base_sync:
+            super()._sync_base_weights(update_func)
+            return
+        pbar = tqdm(desc=f"[{self._group_name}] Update weights (bridge)", total=0) if self._is_global_source else None
+        megatron_local_weights = self.weights_getter()
+        for hf_named_tensors in self._hf_weight_iterator.get_hf_weight_chunks(
+            megatron_local_weights, weight_type="base"
+        ):
+            if self._is_global_source:
+                update_func(hf_named_tensors, pbar)
 
     def _update_weight_implementation(
         self, converted_named_tensors: list[tuple[str, torch.Tensor]], pbar: tqdm | None = None
