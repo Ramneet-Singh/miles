@@ -1,0 +1,80 @@
+---
+# agent-server.yml — build and run the Harbor agent server on node0.
+#
+# The agent server (examples/.../agent_server/server.py, built into the
+# agent_env image) is the rollout backend for agentic RL: the training job
+# POSTs /run per (prompt, sample) and gets back a verifier reward. It runs as a
+# SINGLE instance on the head node and drives the host docker daemon (over the
+# bind-mounted socket) to spawn one task container per trial.
+#
+# Run from cluster/ansible/ (after the fork is synced):
+#   ansible-playbook agent-server.yml
+#   Force a clean rebuild + recreate:  ansible-playbook agent-server.yml -e recreate=true
+- name: Build and run the Harbor agent server
+  hosts: head
+  gather_facts: false
+  vars:
+    image: "agent_env:latest"
+    # The agent_server/ dir in the bind-mounted fork on node0 is the build context.
+    context: "/home/user/miles-fork/examples/experimental/swe-agent-v2/agent_server"
+    # TB2 task set already staged on shared CPFS; instance_id indexes a subdir here.
+    harbor_tasks_dir: "/cpfs01/harbor_tasks/terminal-bench"
+    # Per-trial artifact dir. Must be a path identical on host and inside the
+    # container (Harbor drives the HOST daemon over the shared socket), so it
+    # lives on the identically-mounted /cpfs01. See server.py:_trials_dir.
+    harbor_trials_dir: "/cpfs01/harbor-trials"
+    # Concurrent trials. Keep ~= the rollout's concurrent-trajectory count so the
+    # agent layer never queues behind the trainer (queue livelock) nor overruns
+    # node0. Raise with the rollout batch; distributing task containers across
+    # nodes is the parked next throughput lever, not this knob.
+    max_concurrent: 16
+    recreate: false
+  tasks:
+    - name: Remove existing agent_env container (when recreate=true)
+      ansible.builtin.command: docker rm -f agent_env
+      when: recreate | bool
+      failed_when: false
+      changed_when: true
+
+    - name: Is an agent_env container already present?
+      ansible.builtin.command: "docker ps -aq -f name=^agent_env$"
+      register: existing
+      changed_when: false
+
+    # Build only when we are about to (re)run — a rebuilt image an existing
+    # container won't pick up is wasted work. DOCKER_BUILDKIT=0: buildkit's
+    # default attestation manifest leaves /usr/local/bin/docker missing in this
+    # base on our hosts.
+    - name: Build the agent_env image
+      ansible.builtin.command:
+        cmd: "docker build -f {{ context }}/Dockerfile.agent_env -t {{ image }} {{ context }}"
+      environment:
+        DOCKER_BUILDKIT: "0"
+      when: existing.stdout == ""
+      register: build
+      changed_when: "'Successfully built' in build.stdout"
+
+    - name: Run the agent_env container
+      ansible.builtin.command:
+        cmd: >
+          docker run -itd --name agent_env --network host
+          -v /var/run/docker.sock:/var/run/docker.sock
+          -v /cpfs01:/cpfs01
+          -e HARBOR_TASKS_DIR={{ harbor_tasks_dir }}
+          -e HARBOR_TRIALS_DIR={{ harbor_trials_dir }}
+          -e AGENT_MAX_CONCURRENT={{ max_concurrent }}
+          -e HARBOR_DELETE_CONTAINERS=true
+          -e HARBOR_DELETE_TRIALS=true
+          {{ image }}
+      when: existing.stdout == ""
+      register: run
+
+    - name: Wait for /health to report ready
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:11000/health"
+        status_code: 200
+      register: health
+      retries: 30
+      delay: 2
+      until: health.status == 200
+      changed_when: false
