@@ -13,9 +13,11 @@
 #     sample to --custom-agent-function-path (swe_agent_function.run), which
 #     calls the agent server's POST /run. The agent's model calls flow back
 #     through the session server (:30000) -> Rust router -> SGLang engines.
-#   - The generate path resolves through the legacy sglang_rollout dispatch,
-#     which already honors --custom-generate-function-path, so NO
-#     MILES_EXPERIMENTAL_ROLLOUT_REFACTOR is needed (keeps B1's exact path).
+#   - MILES_EXPERIMENTAL_ROLLOUT_REFACTOR=1 is required: it gates registration
+#     of the custom generate function's args (--max-seq-len,
+#     --custom-agent-function-path; arguments.py add_user_provided_function_arguments).
+#     It adapts our legacy fully_async rollout fn via the compatibility shim and
+#     does not touch the bridge weight-sync — the proven GLM agentic-async combo.
 #
 # PREREQUISITES (separate from this launcher):
 #   - Ray cluster up (ansible/ray.yml), all 8 nodes.
@@ -164,6 +166,7 @@ export MASTER_ADDR=$HEAD_IP
 RUNTIME_ENV_JSON="{
   \"env_vars\": {
     \"PYTHONPATH\": \"/root/Megatron-LM/:/root/miles/examples/fully_async:$SWE_AGENT_DIR:/root/miles\",
+    \"MILES_EXPERIMENTAL_ROLLOUT_REFACTOR\": \"1\",
     \"CUDA_DEVICE_MAX_CONNECTIONS\": \"1\",
     \"NCCL_NVLS_ENABLE\": \"1\",
     \"NCCL_IB_HCA\": \"mlx5_bond_0,mlx5_bond_1,mlx5_bond_2,mlx5_bond_3,mlx5_bond_4,mlx5_bond_5,mlx5_bond_6,mlx5_bond_7\",
