@@ -46,6 +46,30 @@ def _transient_error_result(message: str, status_code: int = 503) -> dict:
     }
 
 
+def _context_exceeded_result(max_seq_len: int, prompt_tokens: int, reserved: int) -> dict:
+    """An OpenAI ``context_length_exceeded`` 400 so the agent's client raises
+    ContextWindowExceededError and ends the trajectory cleanly — instead of
+    growing its multi-turn context toward the model's hard limit (which produces
+    late context 400s and oversized training samples that OOM the step)."""
+    err = {
+        "error": {
+            "message": (
+                f"This model's maximum context length is {max_seq_len} tokens. However, your "
+                f"messages resulted in {prompt_tokens} tokens plus {reserved} reserved for the "
+                f"completion. Please reduce the length of the messages."
+            ),
+            "type": "invalid_request_error",
+            "param": "messages",
+            "code": "context_length_exceeded",
+        }
+    }
+    return {
+        "response_body": json.dumps(err).encode(),
+        "status_code": 400,
+        "headers": {"content-type": "application/json"},
+    }
+
+
 def setup_session_routes(app, backend, args):
     hf_checkpoint = getattr(args, "hf_checkpoint", None)
     if not hf_checkpoint:
@@ -212,6 +236,22 @@ def setup_session_routes(app, backend, args):
                     "Using TITO input_ids: %d tokens",
                     len(prompt_token_ids),
                 )
+
+                # Bound the agent's context here: model_info does NOT actually limit
+                # mini-swe-agent, so without this the multi-turn context grows toward
+                # the model's hard limit (~230K seen) -> late context-length 400s and
+                # oversized training samples that OOM the step. End the trajectory
+                # cleanly once prompt + reserved completion would exceed max_seq_len.
+                _max_seq = int(getattr(args, "max_seq_len", 0) or 0)
+                _reserved = int(getattr(args, "rollout_max_response_len", 0) or 0)
+                if _max_seq > 0 and len(prompt_token_ids) + _reserved > _max_seq:
+                    logger.info(
+                        "[session-server] context budget exceeded for %s (%d + %d > %d) -> 400",
+                        session_id, len(prompt_token_ids), _reserved, _max_seq,
+                    )
+                    return backend.build_proxy_response(
+                        _context_exceeded_result(_max_seq, len(prompt_token_ids), _reserved)
+                    )
 
                 body = json.dumps(request_body).encode()
                 expected_num_assistant = session.num_assistant
