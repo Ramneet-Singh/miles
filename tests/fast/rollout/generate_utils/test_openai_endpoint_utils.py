@@ -95,7 +95,7 @@ def _make_record(
 async def test_create_fetches_session_server_instance_id(monkeypatch):
     calls: list[tuple[str, str]] = []
 
-    async def fake_post(url: str, payload: dict, action: str = "post"):
+    async def fake_post(url: str, payload: dict, action: str = "post", timeout: float | None = None):
         calls.append((action, url))
         if action == "get":
             assert url == "http://127.0.0.1:12345/health"

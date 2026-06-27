@@ -15,7 +15,6 @@ import httpx
 import setproctitle
 import uvicorn
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
 from starlette.responses import Response
 
 from miles.rollout.session.sessions import setup_session_routes
@@ -109,12 +108,14 @@ class SessionServer:
             for k, v in result["headers"].items()
             if k.lower() not in ("content-length", "transfer-encoding", "content-encoding")
         }
-        content_type = headers.get("content-type", "")
-        try:
-            data = json.loads(content)
-            return JSONResponse(content=data, status_code=status_code, headers=headers)
-        except (json.JSONDecodeError, UnicodeDecodeError):
-            return Response(content=content, status_code=status_code, headers=headers, media_type=content_type)
+        content_type = headers.get("content-type", "application/json")
+        # The upstream body is already serialized bytes; return it verbatim. Do NOT
+        # json.loads -> JSONResponse: re-encoding the multi-MB per-turn logprob +
+        # routed-expert payload with CPython json.dumps runs on the single event
+        # loop and holds the GIL for the whole encode, serializing all proxying so
+        # the engines starve (py-spy showed the loop pinned in iterencode). Passing
+        # the bytes through removes the hotspot entirely — no parse, no re-encode.
+        return Response(content=content, status_code=status_code, headers=headers, media_type=content_type)
 
 
 def run_session_server(args, backend_url: str):
