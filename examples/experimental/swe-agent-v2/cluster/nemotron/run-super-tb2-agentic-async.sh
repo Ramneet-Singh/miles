@@ -61,7 +61,9 @@ ROLLOUT_ARGS=(
    --n-samples-per-prompt 8      # 8 samples/prompt -> within-group GRPO advantage
    --global-batch-size 32        # = 4 prompts x 8 samples / 1 step
    --rollout-max-response-len 8192   # per-TURN response cap
-   --max-seq-len 65536           # full multi-turn trajectory cap (prompt + all turns + env outputs); model supports 256K
+   --max-seq-len 32768           # full multi-turn trajectory cap; the session server now ENFORCES this
+                                 # (context_length_exceeded 400) so the agent ends cleanly instead of running
+                                 # to the model's ~256K limit. Sharded across CP2 in training (16k/rank).
    --rollout-temperature 1
    --balance-data
 )
@@ -91,16 +93,20 @@ ASYNC_ARGS=(
 
 PERF_ARGS=(
    --tensor-model-parallel-size 4
-   --sequence-parallel                  # shards the long-trajectory activation across TP ranks
+   --sequence-parallel                  # shards LayerNorm/dropout activations across TP ranks
    --pipeline-model-parallel-size 2
-   --context-parallel-size 1
+   --context-parallel-size 2            # shards the long-trajectory SEQUENCE across 2 GPUs -> halves per-GPU
+                                        # activation so the MoE forward fits at 32k context. Layout becomes
+                                        # TP4*PP2*CP2 = 16 GPU/replica -> DP2. Free of the usual DP/optimizer
+                                        # penalty because --optimizer-cpu-offload keeps optimizer states off-GPU.
    --expert-model-parallel-size 8
    --expert-tensor-parallel-size 1
    --recompute-granularity full
    --recompute-method uniform
    --recompute-num-layers 1
    --use-dynamic-batch-size
-   --max-tokens-per-gpu 65536           # must hold one full ≤64K trajectory per microbatch; SP shards the activation. WATCH for train OOM on long trajectories.
+   --max-tokens-per-gpu 16384           # ~= max_seq_len // cp_size (CP shards the sequence): one full 32k
+                                        # trajectory -> 16k tokens/rank, ~1.8x B1's proven 9216. WATCH for OOM.
    --log-probs-chunk-size 128
 )
 
