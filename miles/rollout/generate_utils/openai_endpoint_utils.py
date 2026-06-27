@@ -18,6 +18,11 @@ from miles.utils.types import Sample
 logger = logging.getLogger(__name__)
 
 _SESSION_REQUEST_TIMEOUT = 120
+# Per-attempt bound on each control-plane call (health/create/records/delete).
+# These are node-local and should return in well under a second; a longer hang
+# means a dead/half-open connection, so we want the attempt to raise quickly and
+# let post()'s retry loop reconnect — all still inside _SESSION_REQUEST_TIMEOUT.
+_SESSION_CONTROL_ATTEMPT_TIMEOUT = 30
 
 
 class OpenAIEndpointTracer:
@@ -39,14 +44,16 @@ class OpenAIEndpointTracer:
         session_url = f"http://{session_ip}:{session_port}"
         session_server_instance_id = None
         try:
-            health = await post(f"{session_url}/health", {}, action="get")
+            health = await post(
+                f"{session_url}/health", {}, action="get", timeout=_SESSION_CONTROL_ATTEMPT_TIMEOUT
+            )
             if isinstance(health, dict):
                 session_server_instance_id = health.get("session_server_instance_id")
                 if session_server_instance_id is not None:
                     args.session_server_instance_id = session_server_instance_id
         except Exception as e:
             logger.warning("Failed to get session server health from %s: %s", session_url, e)
-        response = await post(f"{session_url}/sessions", {}, action="post")
+        response = await post(f"{session_url}/sessions", {}, action="post", timeout=_SESSION_CONTROL_ATTEMPT_TIMEOUT)
         session_id = response["session_id"]
         return OpenAIEndpointTracer(
             router_url=session_url,
@@ -57,7 +64,7 @@ class OpenAIEndpointTracer:
     async def collect_records(self) -> tuple[list[SessionRecord], dict]:
         try:
             response = await asyncio.wait_for(
-                post(self.base_url, {}, action="get"),
+                post(self.base_url, {}, action="get", timeout=_SESSION_CONTROL_ATTEMPT_TIMEOUT),
                 timeout=_SESSION_REQUEST_TIMEOUT,
             )
         except asyncio.TimeoutError:
@@ -68,7 +75,7 @@ class OpenAIEndpointTracer:
             # Still attempt to clean up the session.
             try:
                 await asyncio.wait_for(
-                    post(self.base_url, {}, action="delete"),
+                    post(self.base_url, {}, action="delete", timeout=_SESSION_CONTROL_ATTEMPT_TIMEOUT),
                     timeout=_SESSION_REQUEST_TIMEOUT,
                 )
             except Exception:
@@ -83,7 +90,7 @@ class OpenAIEndpointTracer:
 
         try:
             await asyncio.wait_for(
-                post(self.base_url, {}, action="delete"),
+                post(self.base_url, {}, action="delete", timeout=_SESSION_CONTROL_ATTEMPT_TIMEOUT),
                 timeout=_SESSION_REQUEST_TIMEOUT,
             )
         except Exception as e:

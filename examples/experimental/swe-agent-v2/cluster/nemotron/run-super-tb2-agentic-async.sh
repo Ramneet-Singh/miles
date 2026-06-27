@@ -138,6 +138,15 @@ SGLANG_ARGS=(
    --use-rollout-routing-replay        # sigmoid-MoE logprob alignment
    --sglang-reasoning-parser nemotron_3   # matches Nemotron3TITOTokenizer
    --sglang-tool-call-parser qwen3_coder
+   # Timeout cascade (router < session < agent), all > the observed ~215s legit
+   # turn so real generations survive but true hangs are bounded:
+   #   router->engine 300s  <  session->router 450s  <  agent litellm 600s.
+   # Default router timeout is 14400s (4h): a single hung engine call would then
+   # occupy the session server's single event loop for hours, starving every
+   # other turn AND the post-trajectory records GET (the 120s-timeout that was
+   # silently dropping completed trajectories). Bounding it here frees the loop.
+   --sglang-router-request-timeout-secs 300
+   --miles-router-timeout 450           # session-server->router proxy client (session_server.py)
 )
 
 MISC_ARGS=(

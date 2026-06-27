@@ -33,8 +33,16 @@ class SessionServer:
         self.app = FastAPI()
 
         timeout = getattr(args, "miles_router_timeout", 600.0)
+        # Expire idle keepalive connections quickly so a router-side close never
+        # leaves a half-open socket to be reused (which hangs the next proxy
+        # request until `timeout`). Pairs with the same hygiene on the rollout
+        # driver's client (miles.utils.http_utils).
         self.client = httpx.AsyncClient(
-            limits=httpx.Limits(max_connections=1024),
+            limits=httpx.Limits(
+                max_connections=1024,
+                max_keepalive_connections=1024,
+                keepalive_expiry=float(os.getenv("MILES_HTTP_KEEPALIVE_EXPIRY_SEC", "30")),
+            ),
             timeout=httpx.Timeout(timeout),
         )
 
