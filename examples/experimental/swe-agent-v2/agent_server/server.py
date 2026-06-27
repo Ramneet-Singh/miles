@@ -250,6 +250,15 @@ def _build_agent(request: RunRequest):
     if request.max_seq_len is not None:
         kwargs["max_seq_len"] = request.max_seq_len
 
+    # Text-based action mode (bash in ```mswea_bash_command``` blocks) instead of
+    # OpenAI tool-calls: Nemotron-3-Super returns a free-form planning JSON rather
+    # than a tool call, so tool-call mode FormatErrors every turn (-> TITO desync
+    # -> AgentError, 0 trajectories submit). The config is baked into the agent_env
+    # image; set AGENT_CONFIG_FILE="" to fall back to default tool-call mode.
+    config_file = os.getenv("AGENT_CONFIG_FILE", "/app/mini-textbased.yaml")
+    if config_file:
+        kwargs["config_file"] = config_file
+
     # The agent talks to the model via these OpenAI/vLLM-style endpoint vars; the
     # session server behind base_url proxies to the engine and traces each turn.
     env = {

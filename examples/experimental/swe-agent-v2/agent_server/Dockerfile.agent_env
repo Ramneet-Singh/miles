@@ -30,5 +30,8 @@ RUN pip install --no-cache-dir "harbor==0.15.0" fastapi uvicorn httpx
 
 WORKDIR /app
 COPY server.py /app/server.py
+# Text-based action config (mini-swe-agent emits bash blocks, not tool calls) —
+# passed to each trial via AgentConfig.kwargs["config_file"]. See server.py.
+COPY mini-textbased.yaml /app/mini-textbased.yaml
 EXPOSE 11000
 CMD ["python", "server.py", "--port", "11000", "--max-concurrent", "8"]
