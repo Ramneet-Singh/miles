@@ -268,8 +268,15 @@ def _build_agent(request: RunRequest):
         "HOSTED_VLLM_API_KEY": request.api_key,
         "MSWEA_COST_TRACKING": "ignore_errors",
     }
+    # Use our output-capped mini-swe-agent subclass (bounds per-command captured
+    # output so trajectory.json can't balloon to GBs and corrupt -> AgentError /
+    # empty records; see capped_mini_swe_agent.py). Harbor resolves an import_path
+    # via AgentFactory.create_agent_from_import_path. Set AGENT_IMPORT_PATH="" to
+    # fall back to the trainer-provided agent name (stock, uncapped mini-swe-agent).
+    import_path = os.getenv("AGENT_IMPORT_PATH", "capped_mini_swe_agent:CappedMiniSweAgent")
+    agent_id = {"import_path": import_path} if import_path else {"name": request.agent_name}
     return AgentConfig(
-        name=request.agent_name,
+        **agent_id,
         model_name=request.model,
         env=env,
         kwargs=kwargs,

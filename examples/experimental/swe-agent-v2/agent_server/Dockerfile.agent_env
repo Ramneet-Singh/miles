@@ -29,7 +29,14 @@ RUN mkdir -p /usr/local/lib/docker/cli-plugins \
 RUN pip install --no-cache-dir "harbor==0.15.0" fastapi uvicorn httpx
 
 WORKDIR /app
+# /app on the path so harbor's AgentFactory.create_agent_from_import_path can
+# import "capped_mini_swe_agent:CappedMiniSweAgent" (the output-capped agent).
+ENV PYTHONPATH=/app
 COPY server.py /app/server.py
+# Output-capped mini-swe-agent subclass: bounds per-command captured output so
+# trajectory.json can't balloon to GBs and corrupt -> AgentError. Selected via
+# AGENT_IMPORT_PATH (server.py). See capped_mini_swe_agent.py.
+COPY capped_mini_swe_agent.py /app/capped_mini_swe_agent.py
 # Text-based action config (mini-swe-agent emits bash blocks, not tool calls) —
 # passed to each trial via AgentConfig.kwargs["config_file"]. See server.py.
 COPY mini-textbased.yaml /app/mini-textbased.yaml
