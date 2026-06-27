@@ -20,6 +20,30 @@ from miles.utils.processing_utils import load_tokenizer
 logger = logging.getLogger(__name__)
 
 
+def _record_to_result(record: SessionRecord) -> dict:
+    """Rebuild a ``do_proxy``-shaped result from a stored committed record, so a
+    replayed turn returns through the same ``build_proxy_response`` path.
+
+    Only the JSON body and status are reconstructed; upstream response headers
+    are not (the agent reads the JSON body, and a committed turn is always a 200).
+    """
+    return {
+        "response_body": json.dumps(record.response).encode(),
+        "status_code": record.status_code,
+        "headers": {"content-type": "application/json"},
+    }
+
+
+def _transient_error_result(message: str, status_code: int = 503) -> dict:
+    """A ``do_proxy``-shaped transient error, so the agent's client retries (and
+    re-syncs) instead of consuming a stale/uncommitted turn."""
+    return {
+        "response_body": json.dumps({"error": {"message": message, "type": "server_error"}}).encode(),
+        "status_code": status_code,
+        "headers": {"content-type": "application/json"},
+    }
+
+
 def setup_session_routes(app, backend, args):
     hf_checkpoint = getattr(args, "hf_checkpoint", None)
     if not hf_checkpoint:
@@ -154,6 +178,18 @@ def setup_session_routes(app, backend, args):
                 request_body["no_stop_trim"] = False
 
                 request_messages = request_body.get("messages", [])
+
+                # Idempotent replay: if the agent re-requests a turn the session
+                # already committed (its client retried a request we already
+                # generated and stored), return the committed response verbatim
+                # instead of regenerating. Otherwise the agent keeps an assistant
+                # turn the session didn't store, desyncing its history from the
+                # stored prefix so every later turn fails the append-only check.
+                replay = session.find_committed_replay(request_messages)
+                if replay is not None:
+                    logger.info("[session-server] idempotent replay for session %s (turn already committed)", session_id)
+                    return backend.build_proxy_response(_record_to_result(replay))
+
                 prompt_token_ids = session.prepare_pretokenized(
                     request_messages,
                     tools=request_body.get("tools"),
@@ -218,9 +254,24 @@ def setup_session_routes(app, backend, args):
                     logger.warning(
                         f"Session {session_id} state changed during proxy "
                         f"(expected num_assistant={expected_num_assistant}, "
-                        f"got {session.num_assistant}), skipping state update"
+                        f"got {session.num_assistant}); returning the committed turn"
                     )
-                    return backend.build_proxy_response(result)
+                    # A concurrent request committed this turn while we generated.
+                    # Return the COMMITTED response, not our now-stale local
+                    # generation, so the agent stays in lockstep with the stored
+                    # prefix (returning the stale turn is the desync that makes a
+                    # later turn fail the append-only check).
+                    if expected_num_assistant < len(session.records):
+                        return backend.build_proxy_response(
+                            _record_to_result(session.records[expected_num_assistant])
+                        )
+                    # A concurrent rollback truncated past this turn's record, so
+                    # there is no committed turn to replay. Return a transient
+                    # error (not the stale local generation) so the agent retries
+                    # and re-syncs cleanly rather than silently desyncing.
+                    return backend.build_proxy_response(
+                        _transient_error_result("session state changed concurrently; please retry")
+                    )
 
                 session.update_pretokenized_state(
                     request_messages,

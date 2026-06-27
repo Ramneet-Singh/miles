@@ -752,3 +752,61 @@ class TestComputeSessionMismatch:
         _, kwargs = mock_tokenize.call_args
         assert kwargs["tools"] == tools
         assert kwargs["add_generation_prompt"] is False
+
+
+class TestFindCommittedReplay:
+    """Idempotent replay: re-requesting an already-committed turn replays its
+    stored record instead of regenerating, keeping the agent in lockstep with
+    the stored prefix (the fix for the assistant-append desync under client
+    retries)."""
+
+    @staticmethod
+    def _two_turn_session(registry: SessionRegistry):
+        """Commit two turns, attaching a record per commit (as the handler does)."""
+        session = registry.get_session(registry.create_session())
+
+        turn1 = [SYS_MSG, USER_MSG]
+        session.update_pretokenized_state(turn1, ASSISTANT_MSG_1, [1, 2, 3], [10, 11], max_trim_tokens=0)
+        rec1 = SessionRecord(
+            timestamp=0.0, method="POST", path="/v1/chat/completions", status_code=200,
+            request={"messages": turn1}, response={"id": "turn1", "choices": []},
+        )
+        session.append_record(rec1)
+
+        turn2 = [SYS_MSG, USER_MSG, ASSISTANT_MSG_1, TOOL_MSG_1]
+        session.update_pretokenized_state(turn2, ASSISTANT_MSG_FINAL, [1, 2, 3, 10, 11, 20], [30, 31], max_trim_tokens=0)
+        rec2 = SessionRecord(
+            timestamp=0.0, method="POST", path="/v1/chat/completions", status_code=200,
+            request={"messages": turn2}, response={"id": "turn2", "choices": []},
+        )
+        session.append_record(rec2)
+        return session, rec1, rec2
+
+    def test_replay_of_committed_turn_returns_its_record(self, registry: SessionRegistry):
+        session, rec1, rec2 = self._two_turn_session(registry)
+        # Re-requesting turn 1's exact messages replays turn 1's record...
+        assert session.find_committed_replay([SYS_MSG, USER_MSG]) is rec1
+        # ...and turn 2's replays turn 2's record.
+        assert session.find_committed_replay([SYS_MSG, USER_MSG, ASSISTANT_MSG_1, TOOL_MSG_1]) is rec2
+
+    def test_divergent_retry_returns_none(self, registry: SessionRegistry):
+        # Same prefix, different tool result — a real divergent retry, not a
+        # replay; must fall through to the rollback path.
+        session, _, _ = self._two_turn_session(registry)
+        assert session.find_committed_replay([SYS_MSG, USER_MSG, ASSISTANT_MSG_1, TOOL_MSG_2]) is None
+
+    def test_extension_returns_none(self, registry: SessionRegistry):
+        # The normal next-turn request extends past the stored history -> generate.
+        session, _, _ = self._two_turn_session(registry)
+        nxt = [SYS_MSG, USER_MSG, ASSISTANT_MSG_1, TOOL_MSG_1, ASSISTANT_MSG_FINAL, TOOL_MSG_2]
+        assert session.find_committed_replay(nxt) is None
+
+    def test_request_ending_at_non_assistant_returns_none(self, registry: SessionRegistry):
+        # A prefix whose next stored message is a tool (not a committed assistant)
+        # has no turn to replay.
+        session, _, _ = self._two_turn_session(registry)
+        assert session.find_committed_replay([SYS_MSG, USER_MSG, ASSISTANT_MSG_1]) is None
+
+    def test_empty_session_returns_none(self, registry: SessionRegistry):
+        session = registry.get_session(registry.create_session())
+        assert session.find_committed_replay([SYS_MSG, USER_MSG]) is None

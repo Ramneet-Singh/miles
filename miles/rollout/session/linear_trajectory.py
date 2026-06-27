@@ -44,6 +44,41 @@ class LinearTrajectory:
     def append_record(self, record: SessionRecord) -> None:
         self.records.append(record)
 
+    def find_committed_replay(self, request_messages: list[dict[str, Any]]) -> SessionRecord | None:
+        """Return the committed record to replay if *request_messages* re-requests
+        an already-committed turn, else ``None``.
+
+        An agent retry (e.g. its HTTP client times out or drops a request the
+        session has — unbeknownst to the client — already generated and
+        committed) re-sends the *same* messages.  Those messages form a strict
+        prefix of the stored history ending right before a committed assistant
+        turn.  We must replay that turn's stored response verbatim: regenerating
+        (or rolling back) would hand the agent a *different* assistant turn than
+        the one the session stored, desyncing the two so every later turn fails
+        the append-only check (an unexpected ``assistant`` append).  Idempotent
+        replay keeps them in lockstep.
+
+        Returns ``None`` for a genuinely new turn, an extension, or a *divergent*
+        retry (different tool args) — the latter is handled by rollback.
+
+        Must be called under ``self.lock``.
+        """
+        n = len(request_messages)
+        # A replay re-requests an EXISTING turn, so it is strictly shorter than
+        # the stored history and the next stored message is the committed
+        # assistant for the turn being requested.
+        if n >= len(self.messages) or self.messages[n].get("role") != "assistant":
+            return None
+        # The shared prefix must match exactly; any divergence is a real retry.
+        if any(not message_matches(self.messages[i], request_messages[i]) for i in range(n)):
+            return None
+        # records are appended one-per-committed-turn, so the record for the
+        # requested turn is indexed by the assistant count in the request.
+        turn_index = sum(1 for m in request_messages if m.get("role") == "assistant")
+        if turn_index >= len(self.records):
+            return None
+        return self.records[turn_index]
+
     def prepare_pretokenized(
         self,
         request_messages: list[dict[str, Any]],
