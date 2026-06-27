@@ -1,3 +1,5 @@
+import asyncio
+import functools
 import json
 import logging
 import time
@@ -190,10 +192,20 @@ def setup_session_routes(app, backend, args):
                     logger.info("[session-server] idempotent replay for session %s (turn already committed)", session_id)
                     return backend.build_proxy_response(_record_to_result(replay))
 
-                prompt_token_ids = session.prepare_pretokenized(
-                    request_messages,
-                    tools=request_body.get("tools"),
-                    tito_tokenizer=registry.tito_tokenizer,
+                # Offload the CPU-bound tokenization to the worker pool (the fast
+                # tokenizer releases the GIL, so different sessions tokenize in
+                # parallel). We still hold session.lock across the await, so this
+                # session's own turns stay serialized; only cross-session work
+                # parallelizes. Mutations inside prepare_pretokenized are thus
+                # exclusive to this session.
+                prompt_token_ids = await asyncio.get_running_loop().run_in_executor(
+                    backend.tokenize_pool,
+                    functools.partial(
+                        session.prepare_pretokenized,
+                        request_messages,
+                        tools=request_body.get("tools"),
+                        tito_tokenizer=registry.tito_tokenizer,
+                    ),
                 )
                 request_body["input_ids"] = prompt_token_ids
                 logger.debug(
@@ -214,7 +226,11 @@ def setup_session_routes(app, backend, args):
             if result["status_code"] != 200:
                 return backend.build_proxy_response(result)
 
-            response = json.loads(result["response_body"])
+            # Parse off the event loop too: with R3 on, responses carry multi-MB
+            # routing payloads whose parse would otherwise block the single loop.
+            response = await asyncio.get_running_loop().run_in_executor(
+                backend.tokenize_pool, json.loads, result["response_body"]
+            )
 
             choice = response.get("choices", [{}])[0]
 

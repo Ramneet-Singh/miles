@@ -8,6 +8,8 @@ load balancing and forwarding to worker engines.
 
 import json
 import logging
+import os
+from concurrent.futures import ThreadPoolExecutor
 
 import httpx
 import setproctitle
@@ -36,8 +38,18 @@ class SessionServer:
             timeout=httpx.Timeout(timeout),
         )
 
-        # Close the httpx connection pool when uvicorn shuts down to avoid FD leaks.
+        # Offload the CPU-bound per-turn TITO tokenization (and large-response
+        # JSON parsing) off the single event loop. The HF fast tokenizer releases
+        # the GIL during encode, so worker threads tokenize different sessions in
+        # true parallel — removing the head-of-line blocking that made the server
+        # slow under high concurrency (which in turn triggered client retries).
+        # Per-session ordering is still serialized by session.lock.
+        n_threads = int(os.getenv("SESSION_SERVER_TOKENIZE_THREADS", str(min(32, (os.cpu_count() or 8)))))
+        self.tokenize_pool = ThreadPoolExecutor(max_workers=n_threads, thread_name_prefix="session-tokenize")
+
+        # Release the httpx pool + worker threads when uvicorn shuts down.
         self.app.router.on_shutdown.append(self.client.aclose)
+        self.app.router.on_shutdown.append(lambda: self.tokenize_pool.shutdown(wait=False))
 
         setup_session_routes(self.app, self, args)
 
