@@ -28,6 +28,9 @@
     # node0. Raise with the rollout batch; distributing task containers across
     # nodes is the parked next throughput lever, not this knob.
     max_concurrent: 16
+    # Keep per-trial dirs for debugging (default true = delete after each rollout).
+    # Override with -e harbor_delete_trials=false to capture failing trajectories.
+    harbor_delete_trials: true
     recreate: false
   tasks:
     - name: Remove existing agent_env container (when recreate=true)
@@ -64,7 +67,7 @@
           -e HARBOR_TRIALS_DIR={{ harbor_trials_dir }}
           -e AGENT_MAX_CONCURRENT={{ max_concurrent }}
           -e HARBOR_DELETE_CONTAINERS=true
-          -e HARBOR_DELETE_TRIALS=true
+          -e HARBOR_DELETE_TRIALS={{ harbor_delete_trials | string | lower }}
           {{ image }}
       when: existing.stdout == ""
       register: run

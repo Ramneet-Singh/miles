@@ -54,9 +54,12 @@ ROLLOUT_ARGS=(
    # No --rm-type / --apply-chat-template: reward comes from the agent server
    # (--custom-rm-path below) and the agent builds its own chat via TITO.
    --num-rollout 20              # horizon; watch the FIRST step before committing hours (each step is minutes/trajectory)
-   --rollout-batch-size 8        # 8 distinct prompts/step
-   --n-samples-per-prompt 16     # 16 samples/prompt -> within-group GRPO advantage
-   --global-batch-size 128       # = 8 prompts x 16 samples / 1 step
+   # 32 in-flight trajectories (= rollout-batch-size x n-samples) — the validated
+   # envelope. 128-wide saturated the agent/session layer (slow turns, aborts);
+   # scale back up once a step lands cleanly.
+   --rollout-batch-size 4        # 4 distinct prompts/step
+   --n-samples-per-prompt 8      # 8 samples/prompt -> within-group GRPO advantage
+   --global-batch-size 32        # = 4 prompts x 8 samples / 1 step
    --rollout-max-response-len 8192   # per-TURN response cap
    --max-seq-len 65536           # full multi-turn trajectory cap (prompt + all turns + env outputs); model supports 256K
    --rollout-temperature 1
