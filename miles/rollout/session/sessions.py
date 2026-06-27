@@ -138,11 +138,21 @@ def setup_session_routes(app, backend, args):
             metadata["tito_session_mismatch"] = mismatch
         metadata["accumulated_token_ids"] = session.token_ids
         metadata["max_trim_tokens"] = registry.tito_tokenizer.max_trim_tokens
-        return GetSessionResponse(
+        response = GetSessionResponse(
             session_id=session_id,
             records=session.records,
             metadata=metadata,
         )
+        # Serialize the (multi-MB, full-trajectory) records OFF the event loop.
+        # FastAPI's default path (jsonable_encoder + json.dumps) runs on the single
+        # event loop and blocks all proxying/collection — py-spy showed the loop
+        # pinned in model_dump/iterencode here once the per-turn proxy was unblocked.
+        # pydantic-core's Rust serializer is far faster; we run it in the tokenize
+        # pool, mirroring the per-turn tokenization offload above.
+        body = await asyncio.get_running_loop().run_in_executor(
+            backend.tokenize_pool, response.model_dump_json
+        )
+        return Response(content=body, media_type="application/json")
 
     @app.delete("/sessions/{session_id}")
     async def delete_session(session_id: str):
