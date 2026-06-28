@@ -109,8 +109,10 @@ PERF_ARGS=(
                                         # activation (494 MiB short of 140 GiB). Smaller packed microbatches
                                         # shrink the activation peak. NB this can't split a single sequence
                                         # below its per-rank shard, so a rare >16k-token trajectory is still a
-                                        # large singleton — the agent output-cap (shorter trajectories) plus
-                                        # expandable_segments below cover that; CP4 (8k/rank) is the fallback.
+                                        # large singleton — the agent output-cap (shorter trajectories) covers
+                                        # the common case; CP2->CP4 (8k/rank) is the fallback if it still OOMs.
+                                        # (Do NOT add PYTORCH_CUDA_ALLOC_CONF=expandable_segments globally: it
+                                        # breaks the SGLang engines' custom-all-reduce CUDA-graph capture.)
    --log-probs-chunk-size 128
 )
 
@@ -190,7 +192,6 @@ RUNTIME_ENV_JSON="{
     \"PYTHONPATH\": \"/root/Megatron-LM/:/root/miles/examples/fully_async:$SWE_AGENT_DIR:/root/miles\",
     \"MILES_EXPERIMENTAL_ROLLOUT_REFACTOR\": \"1\",
     \"CUDA_DEVICE_MAX_CONNECTIONS\": \"1\",
-    \"PYTORCH_CUDA_ALLOC_CONF\": \"expandable_segments:True\",
 
     \"NCCL_NVLS_ENABLE\": \"1\",
     \"NCCL_IB_HCA\": \"mlx5_bond_0,mlx5_bond_1,mlx5_bond_2,mlx5_bond_3,mlx5_bond_4,mlx5_bond_5,mlx5_bond_6,mlx5_bond_7\",
