@@ -54,16 +54,21 @@ ROLLOUT_ARGS=(
    # No --rm-type / --apply-chat-template: reward comes from the agent server
    # (--custom-rm-path below) and the agent builds its own chat via TITO.
    --num-rollout 20              # horizon; watch the FIRST step before committing hours (each step is minutes/trajectory)
-   # 32 in-flight trajectories (= rollout-batch-size x n-samples) — the validated
-   # envelope. 128-wide saturated the agent/session layer (slow turns, aborts);
-   # scale back up once a step lands cleanly.
-   --rollout-batch-size 4        # 4 distinct prompts/step
+   # 64 in-flight trajectories (8x8). Scaled up from the validated 32-wide (4x8)
+   # after the loop ran 20 stable steps: rollout is the ~10x bottleneck (trainer
+   # waits ~600s, computes ~50s) and the engines are underutilized (running-req
+   # 1-7 of 647), so more concurrent agents add samples at ~the same wall-clock ->
+   # tighter GRPO advantage. 64x8G=512G fits node0 (1.7T free); no container
+   # distribution needed. Watch the single-loop session server at 2x concurrency.
+   # Wider batch does NOT raise step-OOM risk (peak activation is per-microbatch,
+   # bounded by --max-tokens-per-gpu; more samples = more microbatches, not bigger).
+   --rollout-batch-size 8        # 8 distinct prompts/step
    --n-samples-per-prompt 8      # 8 samples/prompt -> within-group GRPO advantage
-   --global-batch-size 32        # = 4 prompts x 8 samples / 1 step
+   --global-batch-size 64        # = 8 prompts x 8 samples / 1 step
    --rollout-max-response-len 8192   # per-TURN response cap
    --max-seq-len 32768           # full multi-turn trajectory cap; the session server now ENFORCES this
                                  # (context_length_exceeded 400) so the agent ends cleanly instead of running
-                                 # to the model's ~256K limit. Sharded across CP2 in training (16k/rank).
+                                 # to the model's ~256K limit. Sharded across CP4 in training (8k/rank).
    --rollout-temperature 1
    --balance-data
 )
