@@ -21,6 +21,40 @@ from miles.utils.processing_utils import load_tokenizer
 
 logger = logging.getLogger(__name__)
 
+# Multi-MB-per-turn arrays SGLang returns in ``choice.meta_info`` under R3
+# (routed_experts) + logprobs. The agent (mini-swe-agent) ignores them but stores
+# every response it receives, so accumulated across a long trajectory they
+# OOM-kill the agent process (exit 137) and corrupt its multi-GB trajectory.json.
+# Training reads them from the session RECORD, never from what the agent gets, so
+# we strip them from the agent-facing copy only (the record keeps everything).
+_HEAVY_META_KEYS = frozenset(
+    {
+        "routed_experts",
+        "output_token_logprobs",
+        "input_token_logprobs",
+        "output_top_logprobs",
+        "input_top_logprobs",
+    }
+)
+
+
+def _strip_heavy_meta(response: dict) -> dict:
+    """Return ``response`` with the heavy R3/logprob meta arrays removed from each
+    choice. Copies only the touched nodes (never mutates the input, which the
+    session record aliases); returns the original object when nothing is heavy."""
+    choices = response.get("choices")
+    if not isinstance(choices, list):
+        return response
+    new_choices = []
+    stripped = False
+    for ch in choices:
+        meta = ch.get("meta_info") if isinstance(ch, dict) else None
+        if isinstance(meta, dict) and not _HEAVY_META_KEYS.isdisjoint(meta):
+            ch = {**ch, "meta_info": {k: v for k, v in meta.items() if k not in _HEAVY_META_KEYS}}
+            stripped = True
+        new_choices.append(ch)
+    return {**response, "choices": new_choices} if stripped else response
+
 
 def _record_to_result(record: SessionRecord) -> dict:
     """Rebuild a ``do_proxy``-shaped result from a stored committed record, so a
@@ -28,9 +62,11 @@ def _record_to_result(record: SessionRecord) -> dict:
 
     Only the JSON body and status are reconstructed; upstream response headers
     are not (the agent reads the JSON body, and a committed turn is always a 200).
+    The heavy R3/logprob meta is stripped — the agent never needs it (see
+    ``_strip_heavy_meta``); the record itself is untouched.
     """
     return {
-        "response_body": json.dumps(record.response).encode(),
+        "response_body": json.dumps(_strip_heavy_meta(record.response)).encode(),
         "status_code": record.status_code,
         "headers": {"content-type": "application/json"},
     }
@@ -358,7 +394,11 @@ def setup_session_routes(app, backend, args):
                 session.append_record(record)
             # --- lock released here ---
 
-            return backend.build_proxy_response(result)
+            # Return the response to the agent WITHOUT the heavy R3/logprob meta
+            # (it's already committed in full to the record above for training).
+            # Re-serializing is cheap now that the multi-MB arrays are gone.
+            agent_result = {**result, "response_body": json.dumps(_strip_heavy_meta(response)).encode()}
+            return backend.build_proxy_response(agent_result)
         finally:
             _inflight_chat["count"] -= 1
 
