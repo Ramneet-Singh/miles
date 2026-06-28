@@ -95,10 +95,14 @@ PERF_ARGS=(
    --tensor-model-parallel-size 4
    --sequence-parallel                  # shards LayerNorm/dropout activations across TP ranks
    --pipeline-model-parallel-size 2
-   --context-parallel-size 2            # shards the long-trajectory SEQUENCE across 2 GPUs -> halves per-GPU
-                                        # activation so the MoE forward fits at 32k context. Layout becomes
-                                        # TP4*PP2*CP2 = 16 GPU/replica -> DP2. Free of the usual DP/optimizer
-                                        # penalty because --optimizer-cpu-offload keeps optimizer states off-GPU.
+   --context-parallel-size 4            # CP4: shards the SEQUENCE across 4 GPUs -> 8k tokens/rank for a full 32k
+                                        # trajectory. CP2 (16k/rank) ran 3-4 clean steps then OOM'd (306 MiB short)
+                                        # on a batch with a long-trajectory singleton microbatch; CP4 halves that
+                                        # activation again so any trajectory up to the 32k cap fits. Layout becomes
+                                        # TP4*PP2*CP4 = 32 GPU/replica -> DP1 (all 32 train GPUs = one replica).
+                                        # DP1 is fine here: --optimizer-cpu-offload keeps optimizer states off-GPU,
+                                        # and the run is rollout-bound (step << 800s rollout), so the lost DP
+                                        # replica costs little wall-clock.
    --expert-model-parallel-size 8
    --expert-tensor-parallel-size 1
    --recompute-granularity full
