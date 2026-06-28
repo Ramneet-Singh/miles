@@ -53,7 +53,10 @@ ROLLOUT_ARGS=(
    --rollout-shuffle
    # No --rm-type / --apply-chat-template: reward comes from the agent server
    # (--custom-rm-path below) and the agent builds its own chat via TITO.
-   --num-rollout 20              # horizon; watch the FIRST step before committing hours (each step is minutes/trajectory)
+   --num-rollout 50              # real learning run: 64-wide validated stable; 20 steps was too few to see a
+                                 # reward hill-climb (flat in the CP4 run). ~18min/step -> ~15h. lr stays 1e-6
+                                 # (proven stable, grad_norm 0.2-0.4); if reward is still flat by ~step 25, the
+                                 # next lever is raising lr (2-3e-6) rather than more steps.
    # 64 in-flight trajectories (8x8). Scaled up from the validated 32-wide (4x8)
    # after the loop ran 20 stable steps: rollout is the ~10x bottleneck (trainer
    # waits ~600s, computes ~50s) and the engines are underutilized (running-req
