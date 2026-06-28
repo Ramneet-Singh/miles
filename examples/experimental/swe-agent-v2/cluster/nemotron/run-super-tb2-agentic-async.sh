@@ -141,7 +141,14 @@ SGLANG_ARGS=(
    --sglang-mem-fraction-static 0.8
    # Default sglang_router (Rust), not --use-miles-router (the Python router
    # churned under fully-async load and timed out flush_cache).
-   --use-rollout-routing-replay        # sigmoid-MoE logprob alignment
+   # R3 (--use-rollout-routing-replay) DROPPED for agentic: it makes the engine
+   # return a multi-MB base64 `routed_experts` blob per turn (in choice.sglext +
+   # meta_info). Over a ~38-turn trajectory that is GB-scale — it OOM-killed the
+   # agent process (exit 137), corrupted the trajectory.json, and (kept in the
+   # session record for replay) made the records-GET transfer GB and stall the
+   # session-server event loop. R3 only sharpens the sigmoid-MoE importance-
+   # sampling correction; TIS still works off the rollout logprobs without it.
+   # Re-enable once routed_experts has an efficient (binary/streamed) transfer.
    --sglang-reasoning-parser nemotron_3   # matches Nemotron3TITOTokenizer
    --sglang-tool-call-parser qwen3_coder
    # Timeout cascade (router < session < agent), all > the observed ~215s legit
