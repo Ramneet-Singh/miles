@@ -38,22 +38,19 @@ _HEAVY_META_KEYS = frozenset(
 )
 
 
-def _strip_heavy_meta(response: dict) -> dict:
-    """Return ``response`` with the heavy R3/logprob meta arrays removed from each
-    choice. Copies only the touched nodes (never mutates the input, which the
-    session record aliases); returns the original object when nothing is heavy."""
-    choices = response.get("choices")
-    if not isinstance(choices, list):
-        return response
-    new_choices = []
-    stripped = False
-    for ch in choices:
-        meta = ch.get("meta_info") if isinstance(ch, dict) else None
-        if isinstance(meta, dict) and not _HEAVY_META_KEYS.isdisjoint(meta):
-            ch = {**ch, "meta_info": {k: v for k, v in meta.items() if k not in _HEAVY_META_KEYS}}
-            stripped = True
-        new_choices.append(ch)
-    return {**response, "choices": new_choices} if stripped else response
+def _strip_heavy_meta(obj):
+    """Recursively prune the heavy SGLang extension payloads from a response so the
+    agent never receives/stores them: the whole ``sglext`` blob (where SGLang puts
+    the multi-MB base64 ``routed_experts`` the agent sees) plus the R3/logprob
+    arrays wherever they appear. Returns a pruned copy — the heavy keys are dropped
+    without traversing their (huge) values — and never mutates the input, which the
+    session record aliases. Training reads routed_experts/logprobs from the record's
+    ``meta_info``, not from what the agent gets, so this is agent-side only."""
+    if isinstance(obj, dict):
+        return {k: _strip_heavy_meta(v) for k, v in obj.items() if k != "sglext" and k not in _HEAVY_META_KEYS}
+    if isinstance(obj, list):
+        return [_strip_heavy_meta(v) for v in obj]
+    return obj
 
 
 def _record_to_result(record: SessionRecord) -> dict:
