@@ -136,7 +136,12 @@ GRPO_ARGS=(
 )
 
 OPTIMIZER_ARGS=(
-   --optimizer adam --lr 1e-6 --lr-decay-style constant --weight-decay 0.1
+   --optimizer adam --lr 3e-6 --lr-decay-style constant --weight-decay 0.1   # 1e-6 -> 3e-6: the 50-step
+                                 # lr-1e-6 run was FLAT (reward ~0.20, smoothed delta ~0) despite healthy
+                                 # grad_norm ~0.22 -> updates too small (1e-6 x 0.22 ~= 2e-7/step). 3x larger
+                                 # steps to actually move the policy; grad_norm has headroom (watch it stays
+                                 # <~1-2, not exploding). Secondary lever if still flat/noisy: 8x16 (cut the
+                                 # ~59% all-zero-reward groups that contribute no gradient).
    --adam-beta1 0.9 --adam-beta2 0.98
    --use-precision-aware-optimizer
    # Long trajectories make activations large; offload the optimizer states to
