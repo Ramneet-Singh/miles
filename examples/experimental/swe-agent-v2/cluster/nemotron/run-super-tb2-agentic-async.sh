@@ -53,21 +53,25 @@ ROLLOUT_ARGS=(
    --rollout-shuffle
    # No --rm-type / --apply-chat-template: reward comes from the agent server
    # (--custom-rm-path below) and the agent builds its own chat via TITO.
-   --num-rollout 50              # real learning run: 64-wide validated stable; 20 steps was too few to see a
-                                 # reward hill-climb (flat in the CP4 run). ~18min/step -> ~15h. lr stays 1e-6
-                                 # (proven stable, grad_norm 0.2-0.4); if reward is still flat by ~step 25, the
-                                 # next lever is raising lr (2-3e-6) rather than more steps.
-   # 64 in-flight trajectories (8x8). Scaled up from the validated 32-wide (4x8)
-   # after the loop ran 20 stable steps: rollout is the ~10x bottleneck (trainer
-   # waits ~600s, computes ~50s) and the engines are underutilized (running-req
-   # 1-7 of 647), so more concurrent agents add samples at ~the same wall-clock ->
-   # tighter GRPO advantage. 64x8G=512G fits node0 (1.7T free); no container
-   # distribution needed. Watch the single-loop session server at 2x concurrency.
-   # Wider batch does NOT raise step-OOM risk (peak activation is per-microbatch,
-   # bounded by --max-tokens-per-gpu; more samples = more microbatches, not bigger).
+   --num-rollout 50              # 128-wide (8x16) learning run: lr was ruled out as the lever (1e-6 and 3e-6
+                                 # both flat to ~step 25), so this run tests whether the cleaner gradient from
+                                 # 16 samples/prompt hill-climbs reward. ~30min/step -> ~25h, but a clear climb
+                                 # (or clear flat) should show by ~step 15-20 -> stop early, no need to ride 50.
+   # 128 in-flight trajectories (8x16). Raised samples/prompt 8->16 after lr alone
+   # (1e-6 AND 3e-6, ~25 steps each) failed to clear the noise band (second-half
+   # delta ~+0.02 both). Root cause is the GRADIENT SIGNAL, not step size: with 8
+   # samples, all_zero_percentage averaged ~0.57 (>half of every group all-same
+   # reward -> zero advantage -> no gradient). 16 samples/prompt sharply cuts the
+   # all-zero rate -> denser, cleaner gradient. lr stays 3e-6 (stable, grad_norm
+   # 0.1-0.3) but now has real signal to act on. Wider batch does NOT raise
+   # step-OOM risk (peak activation is per-microbatch, bounded by
+   # --max-tokens-per-gpu; more samples = more microbatches, not bigger). The
+   # agent server caps concurrent trajectories at --max-concurrent (8), so 128/step
+   # runs in 16 waves -> ~2x rollout wall-clock (~30min/step); raise agent
+   # max-concurrent to claw that back (separate container restart).
    --rollout-batch-size 8        # 8 distinct prompts/step
-   --n-samples-per-prompt 8      # 8 samples/prompt -> within-group GRPO advantage
-   --global-batch-size 64        # = 8 prompts x 8 samples / 1 step
+   --n-samples-per-prompt 16     # 16 samples/prompt -> halves the all-zero GRPO groups
+   --global-batch-size 128       # = 8 prompts x 16 samples / 1 step
    --rollout-max-response-len 8192   # per-TURN response cap
    --max-seq-len 32768           # full multi-turn trajectory cap; the session server now ENFORCES this
                                  # (context_length_exceeded 400) so the agent ends cleanly instead of running
@@ -136,12 +140,12 @@ GRPO_ARGS=(
 )
 
 OPTIMIZER_ARGS=(
-   --optimizer adam --lr 3e-6 --lr-decay-style constant --weight-decay 0.1   # 1e-6 -> 3e-6: the 50-step
-                                 # lr-1e-6 run was FLAT (reward ~0.20, smoothed delta ~0) despite healthy
-                                 # grad_norm ~0.22 -> updates too small (1e-6 x 0.22 ~= 2e-7/step). 3x larger
-                                 # steps to actually move the policy; grad_norm has headroom (watch it stays
-                                 # <~1-2, not exploding). Secondary lever if still flat/noisy: 8x16 (cut the
-                                 # ~59% all-zero-reward groups that contribute no gradient).
+   --optimizer adam --lr 3e-6 --lr-decay-style constant --weight-decay 0.1   # lr held at 3e-6: BOTH 1e-6
+                                 # and 3e-6 ran flat to ~step 25 (second-half delta ~+0.02), so lr is NOT the
+                                 # decisive lever — the gradient was too noisy (~57% all-zero groups), not the
+                                 # step too small. 3e-6 is stable (grad_norm 0.1-0.3, no NaN) and now pairs with
+                                 # the 8x16 cleaner gradient. Only revisit lr (down to 2e-6) if grad_norm climbs
+                                 # toward 1-2 on the denser signal.
    --adam-beta1 0.9 --adam-beta2 0.98
    --use-precision-aware-optimizer
    # Long trajectories make activations large; offload the optimizer states to
