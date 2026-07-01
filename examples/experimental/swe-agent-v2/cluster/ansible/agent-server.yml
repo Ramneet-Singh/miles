@@ -31,6 +31,10 @@
     # Keep per-trial dirs for debugging (default true = delete after each rollout).
     # Override with -e harbor_delete_trials=false to capture failing trajectories.
     harbor_delete_trials: true
+    # Which reward field the verifier exposes as the RL scalar. TB2 tasks emit
+    # "reward"; the converted SWE-smith tasks emit partial fields — run with
+    # -e harbor_reward_key=combined for a denser (partial-credit) gradient.
+    harbor_reward_key: reward
     recreate: false
   tasks:
     - name: Remove existing agent_env container (when recreate=true)
@@ -68,6 +72,7 @@
           -e AGENT_MAX_CONCURRENT={{ max_concurrent }}
           -e HARBOR_DELETE_CONTAINERS=true
           -e HARBOR_DELETE_TRIALS={{ harbor_delete_trials | string | lower }}
+          -e HARBOR_REWARD_KEY={{ harbor_reward_key }}
           {{ image }}
       when: existing.stdout == ""
       register: run

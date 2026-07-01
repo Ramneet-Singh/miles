@@ -133,7 +133,12 @@ def _reward(result) -> tuple[float, dict[str, Any]]:
     if vr is None:
         return 0.0, {}
     rewards = getattr(vr, "rewards", None) or {}
-    raw = rewards.get("reward", next(iter(rewards.values()), 0.0))
+    # Which reward field becomes the RL scalar. TB2 verifiers emit "reward";
+    # SWE-smith (converted) emits partial fields (f2p_pass_ratio, combined) —
+    # set HARBOR_REWARD_KEY=combined for a denser gradient. Falls back to
+    # "reward" then the first value so any task type still yields a scalar.
+    key = os.getenv("HARBOR_REWARD_KEY", "reward")
+    raw = rewards.get(key, rewards.get("reward", next(iter(rewards.values()), 0.0)))
     try:
         reward = float(raw)
     except (TypeError, ValueError):
