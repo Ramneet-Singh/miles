@@ -1,0 +1,248 @@
+#!/usr/bin/env bash
+# run-super-swesmith-agentic-async.sh — disaggregated *async* *agentic* RL on
+# Nemotron-3-Super-120B-A12B-BF16. mini-swe-agent fixes SWE-smith bugs (converted
+# to Harbor tasks; difficulty-graded, unlike the 89 hard TB2 eval tasks) via the
+# Harbor agent server; GRPO trains on the partial (combined) verifier reward.
+# Dataset swap only vs run-super-tb2-agentic-async.sh — same 8x16 / lr3e-6 / CP4.
+#
+# This is a clean extension of the validated B1 math run (run-super-math-async.sh):
+# same disaggregated-async machinery (train_async.py, 4 train / 4 infer, bridge
+# weight sync, fully-async rollout, Rust router, abort barrier, TIS), with the
+# dapo-math task swapped for an agentic rollout:
+#   - prompt-data is the SWE-smith task list; reward is pre-computed by the agent
+#     server (read back via --custom-rm-path), not a math grader.
+#   - --custom-generate-function-path opens a TITO session and dispatches each
+#     sample to --custom-agent-function-path (swe_agent_function.run), which
+#     calls the agent server's POST /run. The agent's model calls flow back
+#     through the session server (:30000) -> Rust router -> SGLang engines.
+#   - MILES_EXPERIMENTAL_ROLLOUT_REFACTOR=1 is required: it gates registration
+#     of the custom generate function's args (--max-seq-len,
+#     --custom-agent-function-path; arguments.py add_user_provided_function_arguments).
+#     It adapts our legacy fully_async rollout fn via the compatibility shim and
+#     does not touch the bridge weight-sync — the proven GLM agentic-async combo.
+#
+# PREREQUISITES (separate from this launcher):
+#   - Ray cluster up (ansible/ray.yml), all 8 nodes.
+#   - Agent server up on node0 (ansible/agent-server.yml) — POST /run on :11000.
+#   - TB2 task dirs at /cpfs01/harbor_tasks/terminal-bench (instance_ids match
+#     tb2-tasks.jsonl).
+#
+# Run INSIDE the node0 miles container (pass the W&B key so it is never committed):
+#   docker exec -e WANDB_API_KEY="$WANDB_API_KEY" miles \
+#     bash /root/miles/examples/experimental/swe-agent-v2/cluster/nemotron/run-super-tb2-agentic-async.sh
+set -euo pipefail
+
+MILES_ROOT=${MILES_ROOT:-/root/miles}
+MODELS_DIR=${MODELS_DIR:-/cpfs01/models}
+HEAD_IP=${HEAD_IP:-10.0.96.128}
+SWE_AGENT_DIR=$MILES_ROOT/examples/experimental/swe-agent-v2
+cd "$MILES_ROOT"
+
+source "$MILES_ROOT/scripts/models/nemotron-3-super-120b-a12b.sh"   # sets MODEL_ARGS (incl. MoE routing)
+
+CKPT_ARGS=(
+   # BF16 HF checkpoint via AutoBridge; no --save (throwaway validation run).
+   --hf-checkpoint $MODELS_DIR/NVIDIA-Nemotron-3-Super-120B-A12B-BF16
+   --ref-load      $MODELS_DIR/NVIDIA-Nemotron-3-Super-120B-A12B-BF16
+   --megatron-to-hf-mode bridge
+)
+
+ROLLOUT_ARGS=(
+   # Fully-async rollout: background worker fills a buffer; trainer drains it.
+   --rollout-function-path fully_async_rollout.generate_rollout_fully_async
+   --prompt-data $SWE_AGENT_DIR/cluster/nemotron/swe-smith-py-150.jsonl
+   --input-key prompt --metadata-key metadata   # prompt = task instruction; metadata carries instance_id + agent_name
+   --rollout-shuffle
+   # No --rm-type / --apply-chat-template: reward comes from the agent server
+   # (--custom-rm-path below) and the agent builds its own chat via TITO.
+   --num-rollout 50              # 128-wide (8x16) hill-climb probe on SWE-smith: the TB2 runs flatlined
+                                 # (~0.19, all configs) because the 89 TB2 eval tasks give ~0 learnable signal
+                                 # (all_one~0, all_zero~0.55). SWE-smith is difficulty-graded with abundant
+                                 # easy single-file bugs + partial (combined) reward, so a real reward climb
+                                 # should be visible by ~step 15-20 if the dataset was the bottleneck.
+   # 128 in-flight trajectories (8x16). Raised samples/prompt 8->16 after lr alone
+   # (1e-6 AND 3e-6, ~25 steps each) failed to clear the noise band (second-half
+   # delta ~+0.02 both). Root cause is the GRADIENT SIGNAL, not step size: with 8
+   # samples, all_zero_percentage averaged ~0.57 (>half of every group all-same
+   # reward -> zero advantage -> no gradient). 16 samples/prompt sharply cuts the
+   # all-zero rate -> denser, cleaner gradient. lr stays 3e-6 (stable, grad_norm
+   # 0.1-0.3) but now has real signal to act on. Wider batch does NOT raise
+   # step-OOM risk (peak activation is per-microbatch, bounded by
+   # --max-tokens-per-gpu; more samples = more microbatches, not bigger). The
+   # agent server caps concurrent trajectories at --max-concurrent (8), so 128/step
+   # runs in 16 waves -> ~2x rollout wall-clock (~30min/step); raise agent
+   # max-concurrent to claw that back (separate container restart).
+   --rollout-batch-size 8        # 8 distinct prompts/step
+   --n-samples-per-prompt 16     # 16 samples/prompt -> halves the all-zero GRPO groups
+   --global-batch-size 128       # = 8 prompts x 16 samples / 1 step
+   --rollout-max-response-len 8192   # per-TURN response cap
+   --max-seq-len 32768           # full multi-turn trajectory cap; the session server now ENFORCES this
+                                 # (context_length_exceeded 400) so the agent ends cleanly instead of running
+                                 # to the model's ~256K limit. Sharded across CP4 in training (8k/rank).
+   --rollout-temperature 1
+   --balance-data
+)
+
+AGENT_ARGS=(
+   # Agentic generate: TITO session tracing + dispatch to the Harbor agent server.
+   --custom-generate-function-path miles.rollout.generate_hub.agentic_tool_call.generate
+   --custom-agent-function-path swe_agent_function.run            # POSTs /run to the agent server
+   --custom-rm-path generate.reward_func                          # reads the verifier reward the agent server returned
+   --use-session-server --session-server-port 30000              # traces each turn; session_server_ip defaults to the router (node0)
+   --tito-model nemotron3 --tito-allowed-append-roles tool user   # auto-resolves the chat template; mini-swe-agent appends user-role tool outputs
+   # All-or-nothing group filter: drop a group if any sample aborted. Combined
+   # with rare weight updates + high staleness below to keep the abort rate low.
+   --dynamic-sampling-filter-path miles.rollout.filter_hub.dynamic_sampling_filters.check_no_aborted
+)
+
+ASYNC_ARGS=(
+   # Rare weight updates + high staleness: at the weight-update barrier we must
+   # abort in-flight generation (the only pause mode that lets flush_cache drain
+   # the fully-async queue), which would otherwise kill minutes-long agent
+   # trajectories and poison their GRPO groups. So update seldom and tolerate
+   # stale rollouts, minimizing the trajectory-time that straddles a barrier.
+   --max-weight-staleness 4
+   --update-weights-interval 8
+   --pause-generation-mode abort
+)
+
+PERF_ARGS=(
+   --tensor-model-parallel-size 4
+   --sequence-parallel                  # shards LayerNorm/dropout activations across TP ranks
+   --pipeline-model-parallel-size 2
+   --context-parallel-size 4            # CP4: shards the SEQUENCE across 4 GPUs -> 8k tokens/rank for a full 32k
+                                        # trajectory. CP2 (16k/rank) ran 3-4 clean steps then OOM'd (306 MiB short)
+                                        # on a batch with a long-trajectory singleton microbatch; CP4 halves that
+                                        # activation again so any trajectory up to the 32k cap fits. Layout becomes
+                                        # TP4*PP2*CP4 = 32 GPU/replica -> DP1 (all 32 train GPUs = one replica).
+                                        # DP1 is fine here: --optimizer-cpu-offload keeps optimizer states off-GPU,
+                                        # and the run is rollout-bound (step << 800s rollout), so the lost DP
+                                        # replica costs little wall-clock.
+   --expert-model-parallel-size 8
+   --expert-tensor-parallel-size 1
+   --recompute-granularity full
+   --recompute-method uniform
+   --recompute-num-layers 1
+   --use-dynamic-batch-size
+   --max-tokens-per-gpu 8192            # halved from 16384: the first step OOM'd in the MoE squared_relu
+                                        # activation (494 MiB short of 140 GiB). Smaller packed microbatches
+                                        # shrink the activation peak. NB this can't split a single sequence
+                                        # below its per-rank shard, so a rare >16k-token trajectory is still a
+                                        # large singleton — the agent output-cap (shorter trajectories) covers
+                                        # the common case; CP2->CP4 (8k/rank) is the fallback if it still OOMs.
+                                        # (Do NOT add PYTORCH_CUDA_ALLOC_CONF=expandable_segments globally: it
+                                        # breaks the SGLang engines' custom-all-reduce CUDA-graph capture.)
+   --log-probs-chunk-size 128
+)
+
+GRPO_ARGS=(
+   --advantage-estimator grpo
+   --use-kl-loss --kl-loss-coef 0.00 --kl-loss-type low_var_kl
+   --entropy-coef 0.00 --eps-clip 0.2 --eps-clip-high 0.28
+   --use-tis                            # truncated importance sampling: off-policy correction for the stale async rollouts
+)
+
+OPTIMIZER_ARGS=(
+   --optimizer adam --lr 3e-6 --lr-decay-style constant --weight-decay 0.1   # lr held at 3e-6: BOTH 1e-6
+                                 # and 3e-6 ran flat to ~step 25 (second-half delta ~+0.02), so lr is NOT the
+                                 # decisive lever — the gradient was too noisy (~57% all-zero groups), not the
+                                 # step too small. 3e-6 is stable (grad_norm 0.1-0.3, no NaN) and now pairs with
+                                 # the 8x16 cleaner gradient. Only revisit lr (down to 2e-6) if grad_norm climbs
+                                 # toward 1-2 on the denser signal.
+   --adam-beta1 0.9 --adam-beta2 0.98
+   --use-precision-aware-optimizer
+   # Long trajectories make activations large; offload the optimizer states to
+   # the training node's 2TB host RAM (free in disaggregated mode) for headroom.
+   --optimizer-cpu-offload --overlap-cpu-optimizer-d2h-h2d
+)
+
+SGLANG_ARGS=(
+   --rollout-num-gpus-per-engine 8     # TP8 engines; 32 rollout GPUs -> 4 engines
+   # KV-pool / throughput knob. 0.8 (up from B1's 0.7) gives more concurrent
+   # long-context generation while leaving 1-frac headroom for cuda-graphs, R3
+   # capture, and the weight-update receive buffer. WATCH for engine OOM right
+   # after the first weight broadcast (the symptom of too little headroom).
+   --sglang-mem-fraction-static 0.8
+   # Default sglang_router (Rust), not --use-miles-router (the Python router
+   # churned under fully-async load and timed out flush_cache).
+   # R3 (--use-rollout-routing-replay) DROPPED for agentic: it makes the engine
+   # return a multi-MB base64 `routed_experts` blob per turn (in choice.sglext +
+   # meta_info). Over a ~38-turn trajectory that is GB-scale — it OOM-killed the
+   # agent process (exit 137), corrupted the trajectory.json, and (kept in the
+   # session record for replay) made the records-GET transfer GB and stall the
+   # session-server event loop. R3 only sharpens the sigmoid-MoE importance-
+   # sampling correction; TIS still works off the rollout logprobs without it.
+   # Re-enable once routed_experts has an efficient (binary/streamed) transfer.
+   --sglang-reasoning-parser nemotron_3   # matches Nemotron3TITOTokenizer
+   --sglang-tool-call-parser qwen3_coder
+   # Timeout cascade (router < session < agent), all > the observed ~215s legit
+   # turn so real generations survive but true hangs are bounded:
+   #   router->engine 300s  <  session->router 450s  <  agent litellm 600s.
+   # Default router timeout is 14400s (4h): a single hung engine call would then
+   # occupy the session server's single event loop for hours, starving every
+   # other turn AND the post-trajectory records GET (the 120s-timeout that was
+   # silently dropping completed trajectories). Bounding it here frees the loop.
+   --sglang-router-request-timeout-secs 300
+   --miles-router-timeout 450           # session-server->router proxy client (session_server.py)
+)
+
+MISC_ARGS=(
+   --attention-dropout 0.0 --hidden-dropout 0.0
+   --accumulate-allreduce-grads-in-fp32
+   --attention-softmax-in-fp32
+   --attention-backend auto
+   --moe-token-dispatcher-type alltoall  # allgather doesn't support variable seqlen (--use-dynamic-batch-size)
+   --distributed-timeout-minutes 30    # defensive: FP/CPFS load + first collective can be slow
+)
+
+# W&B (project nemotron-3-super-rl). Enabled only when WANDB_API_KEY is exported
+# (pass via `docker exec -e WANDB_API_KEY=... `) so the key is never committed.
+WANDB_ARGS=()
+if [ -n "${WANDB_API_KEY:-}" ]; then
+  WANDB_ARGS=(
+    --use-wandb
+    --wandb-team proximal_all
+    --wandb-project nemotron-3-super-swesmith
+    --wandb-group "super-swesmith-agentic-async-$(date +%Y%m%d-%H%M%S)"
+    --wandb-key "$WANDB_API_KEY"
+    --disable-wandb-random-suffix
+  )
+fi
+
+# Attach to the EXISTING ray cluster (ansible/ray.yml owns its lifecycle).
+export MILES_SCRIPT_EXTERNAL_RAY=1
+export MASTER_ADDR=$HEAD_IP
+
+# RoCE env must reach the training actors (ray runtime_env does NOT auto-propagate
+# IB_HCA/GID). PYTHONPATH resolves --rollout-function-path (examples/fully_async)
+# and the agent/reward modules (swe-agent-v2: swe_agent_function, generate).
+# Agent env vars tell swe_agent_function where the agent server is and how the
+# agent server should dial back to the session server (MILES_ROUTER_EXTERNAL_HOST).
+RUNTIME_ENV_JSON="{
+  \"env_vars\": {
+    \"PYTHONPATH\": \"/root/Megatron-LM/:/root/miles/examples/fully_async:$SWE_AGENT_DIR:/root/miles\",
+    \"MILES_EXPERIMENTAL_ROLLOUT_REFACTOR\": \"1\",
+    \"CUDA_DEVICE_MAX_CONNECTIONS\": \"1\",
+
+    \"NCCL_NVLS_ENABLE\": \"1\",
+    \"NCCL_IB_HCA\": \"mlx5_bond_0,mlx5_bond_1,mlx5_bond_2,mlx5_bond_3,mlx5_bond_4,mlx5_bond_5,mlx5_bond_6,mlx5_bond_7\",
+    \"NCCL_IB_GID_INDEX\": \"3\",
+    \"NCCL_SOCKET_IFNAME\": \"eth0\",
+    \"GLOO_SOCKET_IFNAME\": \"eth0\",
+    \"WANDB_DIR\": \"/root/wandb\",
+    \"AGENT_SERVER_URL\": \"http://$HEAD_IP:11000\",
+    \"AGENT_MODEL_NAME\": \"model\",
+    \"MILES_ROUTER_EXTERNAL_HOST\": \"$HEAD_IP\"
+  }
+}"
+
+# Disaggregated split: 4 training nodes (32 GPU, 4 DP replicas of TP4*PP2) +
+# 32 rollout GPUs (4 TP8 engines). No --colocate (async rejects it).
+ray job submit --address="http://127.0.0.1:8265" \
+   --runtime-env-json="${RUNTIME_ENV_JSON}" \
+   -- python3 train_async.py \
+   --actor-num-nodes 4 --actor-num-gpus-per-node 8 \
+   --rollout-num-gpus 32 \
+   ${MODEL_ARGS[@]} ${CKPT_ARGS[@]} ${ROLLOUT_ARGS[@]} ${AGENT_ARGS[@]} ${ASYNC_ARGS[@]} \
+   ${OPTIMIZER_ARGS[@]} ${GRPO_ARGS[@]} ${PERF_ARGS[@]} \
+   ${SGLANG_ARGS[@]} ${MISC_ARGS[@]} ${WANDB_ARGS[@]}
