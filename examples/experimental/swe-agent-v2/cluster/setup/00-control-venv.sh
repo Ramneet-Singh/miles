@@ -17,11 +17,12 @@ else
   echo "[setup] creating venv at $VENV_DIR"; "$PYTHON" -m venv "$VENV_DIR"
 fi
 
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$VENV_DIR/bin/activate"
 pip install --upgrade pip >/dev/null
-# ansible-core drives the cluster; modal gives the operator the `modal` CLI on
-# the control node for `modal token new` (Modal task-container backend auth).
-pip install "ansible-core>=2.16" "modal>=0.64"
+# Pinned deps live in requirements.txt (single source of truth): ansible-core to
+# drive the cluster, modal for the `modal` CLI (Modal backend auth) on this node.
+pip install -r "$HERE/requirements.txt"
 
 echo "[setup] done. $(ansible --version | head -1)"
 echo "[setup] activate with: source $VENV_DIR/bin/activate"

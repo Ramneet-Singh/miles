@@ -1,0 +1,9 @@
+# Control-node ops venv — the environment that drives the cluster from node0.
+# Installed by 00-control-venv.sh (or directly: pip install -r requirements.txt).
+# Pinned for reproducibility on a fresh control node; bump deliberately.
+#
+#   ansible-core — runs the cluster playbooks (ray, agent-server, prewarm, ...).
+#   modal        — the `modal` CLI for `modal token new` (Modal task-container
+#                  backend auth) + workspace management from the control node.
+ansible-core==2.21.1
+modal==1.5.1
