@@ -19,7 +19,9 @@ fi
 
 source "$VENV_DIR/bin/activate"
 pip install --upgrade pip >/dev/null
-pip install "ansible-core>=2.16"
+# ansible-core drives the cluster; modal gives the operator the `modal` CLI on
+# the control node for `modal token new` (Modal task-container backend auth).
+pip install "ansible-core>=2.16" "modal>=0.64"
 
 echo "[setup] done. $(ansible --version | head -1)"
 echo "[setup] activate with: source $VENV_DIR/bin/activate"
