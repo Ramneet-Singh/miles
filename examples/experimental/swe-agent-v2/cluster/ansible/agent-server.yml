@@ -23,11 +23,11 @@
     # container (Harbor drives the HOST daemon over the shared socket), so it
     # lives on the identically-mounted /cpfs01. See server.py:_trials_dir.
     harbor_trials_dir: "/cpfs01/harbor-trials"
-    # Concurrent trials. Keep ~= the rollout's concurrent-trajectory count so the
-    # agent layer never queues behind the trainer (queue livelock) nor overruns
-    # node0. Raise with the rollout batch; distributing task containers across
-    # nodes is the parked next throughput lever, not this knob.
-    max_concurrent: 16
+    # Concurrent trials (semaphore in server.py). Keep ~= the rollout's
+    # concurrent-trajectory count. The docker backend is bounded by node0
+    # RAM/disk (~16); the modal backend runs containers off-host, so it can carry
+    # a full 128-sample step in one wave. Override with -e max_concurrent=N.
+    max_concurrent: "{{ 128 if harbor_env_type == 'modal' else 16 }}"
     # Keep per-trial dirs for debugging (default true = delete after each rollout).
     # Override with -e harbor_delete_trials=false to capture failing trajectories.
     harbor_delete_trials: true
@@ -37,10 +37,13 @@
     harbor_reward_key: reward
     # Task-container backend. "docker" (default) runs containers on node0 over the
     # host socket; "modal" runs them off-host on Modal, lifting the node0 RAM/disk
-    # concurrency cap. With modal, export MODAL_TOKEN_ID / MODAL_TOKEN_SECRET (from
-    # `modal token new`) in the shell before running this playbook — they are
-    # passed through to the container at run time and NEVER stored in the repo.
+    # concurrency cap. For modal, run `modal token new` on this node first (writes
+    # ~/.modal.toml); the file below is mounted read-only into the container so the
+    # agent server can create sandboxes. No secret is ever written to the repo.
     harbor_env_type: docker
+    # Modal credentials file (from `modal token new`), mounted into agent_env only
+    # when harbor_env_type=modal. Must exist before the modal run.
+    modal_config_file: "{{ lookup('env', 'HOME') }}/.modal.toml"
     recreate: false
   tasks:
     - name: Remove existing agent_env container (when recreate=true)
@@ -67,14 +70,17 @@
       register: build
       changed_when: "'Successfully built' in build.stdout"
 
+    - name: Fail early if modal creds are missing (modal backend only)
+      ansible.builtin.stat:
+        path: "{{ modal_config_file }}"
+      register: modal_cfg
+      failed_when: harbor_env_type == 'modal' and not modal_cfg.stat.exists
+      when: existing.stdout == ""
+
     - name: Run the agent_env container
-      # MODAL_TOKEN_* are read from the controller's shell env (unset for the
-      # docker backend) and only referenced by NAME on the docker passthrough
-      # flags below, so no secret is ever written to the repo.
-      environment:
-        MODAL_TOKEN_ID: "{{ lookup('env', 'MODAL_TOKEN_ID') }}"
-        MODAL_TOKEN_SECRET: "{{ lookup('env', 'MODAL_TOKEN_SECRET') }}"
       ansible.builtin.command:
+        # For the modal backend, ~/.modal.toml is mounted read-only so the agent
+        # server authenticates to Modal (the file, not the repo, holds the token).
         cmd: >
           docker run -itd --name agent_env --network host
           -v /var/run/docker.sock:/var/run/docker.sock
@@ -86,7 +92,7 @@
           -e HARBOR_DELETE_TRIALS={{ harbor_delete_trials | string | lower }}
           -e HARBOR_REWARD_KEY={{ harbor_reward_key }}
           -e HARBOR_ENV_TYPE={{ harbor_env_type }}
-          {{ '-e MODAL_TOKEN_ID -e MODAL_TOKEN_SECRET' if harbor_env_type == 'modal' else '' }}
+          {{ ('-v ' + modal_config_file + ':/root/.modal.toml:ro') if harbor_env_type == 'modal' else '' }}
           {{ image }}
       when: existing.stdout == ""
       register: run
