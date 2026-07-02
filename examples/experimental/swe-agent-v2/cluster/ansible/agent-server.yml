@@ -35,6 +35,12 @@
     # "reward"; the converted SWE-smith tasks emit partial fields — run with
     # -e harbor_reward_key=combined for a denser (partial-credit) gradient.
     harbor_reward_key: reward
+    # Task-container backend. "docker" (default) runs containers on node0 over the
+    # host socket; "modal" runs them off-host on Modal, lifting the node0 RAM/disk
+    # concurrency cap. With modal, export MODAL_TOKEN_ID / MODAL_TOKEN_SECRET (from
+    # `modal token new`) in the shell before running this playbook — they are
+    # passed through to the container at run time and NEVER stored in the repo.
+    harbor_env_type: docker
     recreate: false
   tasks:
     - name: Remove existing agent_env container (when recreate=true)
@@ -62,6 +68,12 @@
       changed_when: "'Successfully built' in build.stdout"
 
     - name: Run the agent_env container
+      # MODAL_TOKEN_* are read from the controller's shell env (unset for the
+      # docker backend) and only referenced by NAME on the docker passthrough
+      # flags below, so no secret is ever written to the repo.
+      environment:
+        MODAL_TOKEN_ID: "{{ lookup('env', 'MODAL_TOKEN_ID') }}"
+        MODAL_TOKEN_SECRET: "{{ lookup('env', 'MODAL_TOKEN_SECRET') }}"
       ansible.builtin.command:
         cmd: >
           docker run -itd --name agent_env --network host
@@ -73,6 +85,8 @@
           -e HARBOR_DELETE_CONTAINERS=true
           -e HARBOR_DELETE_TRIALS={{ harbor_delete_trials | string | lower }}
           -e HARBOR_REWARD_KEY={{ harbor_reward_key }}
+          -e HARBOR_ENV_TYPE={{ harbor_env_type }}
+          {{ '-e MODAL_TOKEN_ID -e MODAL_TOKEN_SECRET' if harbor_env_type == 'modal' else '' }}
           {{ image }}
       when: existing.stdout == ""
       register: run

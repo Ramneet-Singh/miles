@@ -314,7 +314,14 @@ async def _run_trial(request: RunRequest) -> dict[str, Any]:
             task=TaskConfig(path=task_path),
             agent=_build_agent(request),
             environment=EnvironmentConfig(
-                type="docker",
+                # Backend is env-selectable so the same server drives local Docker
+                # (default) or a remote pool (HARBOR_ENV_TYPE=modal) to lift the
+                # node0 RAM/disk concurrency cap. Any harbor EnvironmentType value
+                # works. No force_build needed: our converted tasks set no
+                # [environment].docker_image, so harbor takes the from-Dockerfile
+                # build path on every backend -> the baked bug-checkout layer is
+                # applied (modal would otherwise silently regrade `main`).
+                type=os.getenv("HARBOR_ENV_TYPE", "docker"),
                 delete=os.getenv("HARBOR_DELETE_CONTAINERS", "true").lower() in ("true", "1", "t"),
                 # Raise the per-container memory cap above the task's native
                 # value (TB2 tasks set 2G): the mini-swe-agent setup step peaks

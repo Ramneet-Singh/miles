@@ -26,7 +26,11 @@ RUN mkdir -p /usr/local/lib/docker/cli-plugins \
       -o /usr/local/lib/docker/cli-plugins/docker-compose \
  && chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
 
-RUN pip install --no-cache-dir "harbor==0.15.0" fastapi uvicorn httpx
+# harbor[modal] pulls the modal SDK at harbor's pinned version so the "modal"
+# environment backend (HARBOR_ENV_TYPE=modal in server.py) can run task
+# containers off-host. The docker CLI/compose above still serve the default
+# "docker" backend; both are selectable at runtime.
+RUN pip install --no-cache-dir "harbor[modal]==0.15.0" fastapi uvicorn httpx
 
 WORKDIR /app
 # /app on the path so harbor's AgentFactory.create_agent_from_import_path can
