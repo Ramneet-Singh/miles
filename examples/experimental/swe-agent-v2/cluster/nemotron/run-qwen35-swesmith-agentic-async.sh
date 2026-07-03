@@ -201,7 +201,6 @@ if [ -n "${WANDB_API_KEY:-}" ]; then
     --wandb-team proximal_all
     --wandb-project qwen35-swesmith
     --wandb-group "qwen35-swesmith-agentic-async-$(date +%Y%m%d-%H%M%S)"
-    --wandb-key "$WANDB_API_KEY"
     --disable-wandb-random-suffix
   )
 fi
@@ -215,8 +214,13 @@ export MASTER_ADDR=$HEAD_IP
 # and the agent/reward modules (swe-agent-v2). Agent env vars tell
 # swe_agent_function where the agent server is and how it should dial back to the
 # session server (MILES_ROUTER_EXTERNAL_HOST).
+# WANDB_API_KEY travels in the runtime-env FILE below (never in argv, so not
+# visible in `ps`). wandb.init() in the actors reads it from the env. Empty when unset.
+WANDB_ENV_KV=""
+[ -n "${WANDB_API_KEY:-}" ] && WANDB_ENV_KV="\"WANDB_API_KEY\": \"$WANDB_API_KEY\","
 RUNTIME_ENV_JSON="{
   \"env_vars\": {
+    $WANDB_ENV_KV
     \"PYTHONPATH\": \"/root/Megatron-LM/:/root/miles/examples/fully_async:$SWE_AGENT_DIR:/root/miles\",
     \"MILES_EXPERIMENTAL_ROLLOUT_REFACTOR\": \"1\",
     \"CUDA_DEVICE_MAX_CONNECTIONS\": \"1\",
@@ -233,10 +237,18 @@ RUNTIME_ENV_JSON="{
   }
 }"
 
+# Write the runtime env to a 0600 file and pass --runtime-env (a path), NOT
+# --runtime-env-json (inline), so WANDB_API_KEY never lands in the process argv
+# (visible via `ps`). Removed on exit.
+RUNTIME_ENV_FILE=$(mktemp /tmp/miles_runtime_env.XXXXXX.json)
+chmod 600 "$RUNTIME_ENV_FILE"
+printf '%s' "$RUNTIME_ENV_JSON" > "$RUNTIME_ENV_FILE"
+trap 'rm -f "$RUNTIME_ENV_FILE"' EXIT
+
 # Disaggregated, inference-heavy split: 2 training nodes (16 GPU: TP2*PP1*CP2 =>
 # DP4, EP8) + 48 rollout GPUs (48 TP1 engines). No --colocate (async rejects it).
 ray job submit --address="http://127.0.0.1:8265" \
-   --runtime-env-json="${RUNTIME_ENV_JSON}" \
+   --runtime-env "$RUNTIME_ENV_FILE" \
    -- python3 train_async.py \
    --actor-num-nodes 2 --actor-num-gpus-per-node 8 \
    --rollout-num-gpus 48 \
