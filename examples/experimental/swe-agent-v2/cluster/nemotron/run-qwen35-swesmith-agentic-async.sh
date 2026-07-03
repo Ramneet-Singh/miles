@@ -58,6 +58,12 @@ HEAD_IP=${HEAD_IP:-10.0.96.128}
 # docker backend; set ROUTER_EXTERNAL_HOST=127.0.0.1 for the Modal SSH-tunnel path
 # (the task container forwards its localhost:30000 -> node0 over ssh).
 ROUTER_EXTERNAL_HOST=${ROUTER_EXTERNAL_HOST:-$HEAD_IP}
+# Rollout width / length — env-overridable for smoke tests; defaults are the real
+# 8x16 / 50-step run. Keep GLOBAL_BATCH_SIZE = ROLLOUT_BATCH_SIZE * N_SAMPLES_PER_PROMPT.
+NUM_ROLLOUT=${NUM_ROLLOUT:-50}
+ROLLOUT_BATCH_SIZE=${ROLLOUT_BATCH_SIZE:-8}
+N_SAMPLES_PER_PROMPT=${N_SAMPLES_PER_PROMPT:-16}
+GLOBAL_BATCH_SIZE=${GLOBAL_BATCH_SIZE:-128}
 SWE_AGENT_DIR=$MILES_ROOT/examples/experimental/swe-agent-v2
 CKPT_DIR=${CKPT_DIR:-/cpfs01/ckpts/qwen35-swesmith}
 cd "$MILES_ROOT"
@@ -85,10 +91,10 @@ ROLLOUT_ARGS=(
    --rollout-shuffle
    # No --rm-type / --apply-chat-template: reward comes from the agent server
    # (--custom-rm-path below) and the agent builds its own chat via TITO.
-   --num-rollout 50              # same 128-wide (8x16) probe length as the Nemotron swesmith run
-   --rollout-batch-size 8        # 8 distinct prompts/step
-   --n-samples-per-prompt 16     # 16 samples/prompt -> dense GRPO gradient (all_zero was pinned 0.0 on this data)
-   --global-batch-size 128       # = 8 prompts x 16 samples / 1 step
+   --num-rollout $NUM_ROLLOUT              # default 50 (8x16 probe); override NUM_ROLLOUT for smoke
+   --rollout-batch-size $ROLLOUT_BATCH_SIZE        # distinct prompts/step (default 8)
+   --n-samples-per-prompt $N_SAMPLES_PER_PROMPT    # samples/prompt (default 16) -> dense GRPO gradient
+   --global-batch-size $GLOBAL_BATCH_SIZE          # = rollout-batch * n-samples (default 128)
    --rollout-max-response-len 16384  # per-TURN cap raised 8k->16k: Qwen3.5 emits <think> blocks, so a single
                                      # turn (reasoning + one bash command) is longer than Nemotron's.
    --max-seq-len 65536           # full multi-turn trajectory cap, 32k->64k. Model supports 256K natively; we
