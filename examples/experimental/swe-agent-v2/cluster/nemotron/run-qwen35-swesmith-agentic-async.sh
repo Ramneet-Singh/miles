@@ -132,6 +132,8 @@ PERF_ARGS=(
    --context-parallel-size 2            # CP2: shards a full 64K trajectory to 32K/rank (see PARALLELISM NOTE).
                                         # Starting point; raise to CP4 (16K/rank, max-tokens 16384) then CP8
                                         # (8K/rank, => DP1) if 32K/rank OOMs.
+   --calculate-per-token-loss           # REQUIRED for CP>1 on the qwen3_5 (VL-family) path (miles asserts it);
+                                        # normalizes the GRPO loss per-token instead of per-sequence.
    --expert-model-parallel-size 8       # 256 experts sharded 8-way; EP spans the group (TP2*PP1*CP2 => DP4 on 16 GPU)
    --expert-tensor-parallel-size 1
    --recompute-granularity full         # activation is layer-count-dominated (40 layers), so still needed for
