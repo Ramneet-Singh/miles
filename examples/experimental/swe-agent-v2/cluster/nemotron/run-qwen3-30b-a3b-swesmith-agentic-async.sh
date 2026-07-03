@@ -11,9 +11,9 @@
 #      a 30B/A3B model fits an inference engine on ONE H200 (~60 GB BF16), so we
 #      move a train node to rollout: 16 train GPUs + 48 rollout GPUs (was 32/32).
 #      The runs were rollout-bound, so this is the highest-leverage change.
-#   2. Context. Qwen3-30B-A3B is native ~32K (rotary-base 1e6). We run at 32K for
-#      now; >32K (our 64K/200K goal) needs YaRN rope-scaling — deferred until the
-#      pipeline is green.
+#   2. Context. Qwen3-30B-A3B native context is 40960 (~40K). We run at native 40K;
+#      >40K (our 64K/200K goal) needs YaRN rope-scaling — deferred (native 40K is
+#      plenty for the current short swe-smith trajectories).
 #   3. Anti-drift carryover from the Nemotron swesmith run (0.72->0.39 no-anchor
 #      drift): lr 2e-6 (was 3e-6) + a small KL coef 0.001 (was 0.0) to anchor
 #      the policy, and we now SAVE checkpoints (cheap at 35B) to keep the peak.
@@ -21,9 +21,9 @@
 # PARALLELISM NOTE (smoke-test the first step before trusting the layout):
 #   - GQA has num_query_groups=4, so TP can be up to 4; we use TP2. Training layout
 #     TP2*PP1*CP2*EP8 = DP4 on 16 GPUs.
-#   - CP2: a single trajectory can't be split without CP. At the 32K seq cap CP2
-#     shards a full trajectory to 16K/rank (so max-tokens-per-gpu >= 16384; we set
-#     32768 for packing headroom). If it OOMs, raise to CP4 (8K/rank) then CP8.
+#   - CP2: a single trajectory can't be split without CP. At the 40K seq cap CP2
+#     shards a full trajectory to 20K/rank (so max-tokens-per-gpu >= 20480; we set
+#     32768 for packing headroom). If it OOMs, raise to CP4 (10K/rank) then CP8.
 #   - Recompute is KEPT. The small model is a big *inference* win (1 GPU/engine)
 #     but only a modest *training-memory* win: stored activation is dominated by
 #     LAYER COUNT (48), not per-token size, so long-context training still needs
@@ -93,9 +93,9 @@ ROLLOUT_ARGS=(
    --global-batch-size $GLOBAL_BATCH_SIZE          # = rollout-batch * n-samples (default 128)
    --rollout-max-response-len 16384  # per-TURN cap raised 8k->16k: Qwen3 emits <think> blocks, so a single
                                      # turn (reasoning + one bash command) is longer than Nemotron's.
-   --max-seq-len 32768           # Qwen3-30B-A3B is native ~32K (rotary-base 1e6). Stay at 32K for now (no YaRN).
-                                 # For >32K (our 64K/200K goal) enable YaRN rope-scaling (MODEL_ARGS_ROTARY_BASE
-                                 # + rope-scaling) — deferred until the pipeline is green.
+   --max-seq-len 40960           # Qwen3-30B-A3B native context (max_position_embeddings=40960). No YaRN needed.
+                                 # For >40K (64K/200K goal) enable YaRN (config.json rope_scaling type=yarn) —
+                                 # deferred; native 40K is plenty for the current short swe-smith trajectories.
    --rollout-temperature 1
    --balance-data
 )
@@ -125,16 +125,16 @@ PERF_ARGS=(
    --tensor-model-parallel-size 2       # GQA num_query_groups=4 allows up to TP4; we use TP2
    --sequence-parallel                  # shards LayerNorm/dropout activations across TP ranks
    --pipeline-model-parallel-size 1
-   --context-parallel-size 2            # CP2: shards a full 32K trajectory to 16K/rank (see PARALLELISM NOTE).
-                                        # Starting point; raise to CP4 (8K/rank) then CP8 (=> DP1) if it OOMs.
+   --context-parallel-size 2            # CP2: shards a full 40K trajectory to 20K/rank (see PARALLELISM NOTE).
+                                        # Starting point; raise to CP4 (10K/rank) then CP8 (=> DP1) if it OOMs.
    --expert-model-parallel-size 8       # 128 experts sharded 8-way; EP spans the group (TP2*PP1*CP2 => DP4 on 16 GPU)
    --expert-tensor-parallel-size 1
    --recompute-granularity full         # activation is layer-count-dominated (48 layers), so still needed for
    --recompute-method uniform           # long context; drop to selective/none only if the smoke step has headroom.
    --recompute-num-layers 1
    --use-dynamic-batch-size
-   --max-tokens-per-gpu 32768           # FLOOR is the per-rank shard: at CP2 a full 32K trajectory is 16K/rank,
-                                        # so >=16384 fits it; 32768 packs more. recompute keeps activation bounded.
+   --max-tokens-per-gpu 32768           # FLOOR is the per-rank shard: at CP2 a full 40K trajectory is 20K/rank,
+                                        # so >=20480 fits it; 32768 packs more. recompute keeps activation bounded.
                                         # (Do NOT set PYTORCH_CUDA_ALLOC_CONF=
                                         # expandable_segments globally: it breaks the SGLang engines' graph capture.)
    --log-probs-chunk-size 128
