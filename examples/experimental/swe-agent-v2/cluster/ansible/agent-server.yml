@@ -44,6 +44,14 @@
     # Modal credentials file (from `modal token new`), mounted into agent_env only
     # when harbor_env_type=modal. Must exist before the modal run.
     modal_config_file: "{{ lookup('env', 'HOME') }}/.modal.toml"
+    # SSH reverse-reachability tunnel (modal backend only): the task container opens
+    # an SSH -L to node0's session server (not publicly exposed) via the restricted
+    # mtunnel key. Mounted/passed only when harbor_env_type=modal; the key file is
+    # mounted (never committed). See capped_mini_swe_agent.py:_tunnel_setup.
+    tunnel_key_file: "{{ lookup('env', 'HOME') }}/miles-tunnel-key/id_tunnel"
+    tunnel_host: "47.74.85.155"
+    tunnel_user: "mtunnel"
+    tunnel_target: "10.0.96.128:30000"
     recreate: false
   tasks:
     - name: Remove existing agent_env container (when recreate=true)
@@ -70,11 +78,14 @@
       register: build
       changed_when: "'Successfully built' in build.stdout"
 
-    - name: Fail early if modal creds are missing (modal backend only)
+    - name: Fail early if modal creds / tunnel key are missing (modal backend only)
       ansible.builtin.stat:
-        path: "{{ modal_config_file }}"
-      register: modal_cfg
-      failed_when: harbor_env_type == 'modal' and not modal_cfg.stat.exists
+        path: "{{ item }}"
+      loop:
+        - "{{ modal_config_file }}"
+        - "{{ tunnel_key_file }}"
+      register: modal_files
+      failed_when: harbor_env_type == 'modal' and not modal_files.stat.exists
       when: existing.stdout == ""
 
     - name: Run the agent_env container
@@ -93,6 +104,11 @@
           -e HARBOR_REWARD_KEY={{ harbor_reward_key }}
           -e HARBOR_ENV_TYPE={{ harbor_env_type }}
           {{ ('-v ' + modal_config_file + ':/root/.modal.toml:ro') if harbor_env_type == 'modal' else '' }}
+          {{ ('-v ' + tunnel_key_file + ':/root/miles-tunnel-key:ro'
+              + ' -e MILES_TUNNEL_KEY_FILE=/root/miles-tunnel-key'
+              + ' -e MILES_TUNNEL_HOST=' + tunnel_host
+              + ' -e MILES_TUNNEL_USER=' + tunnel_user
+              + ' -e MILES_TUNNEL_TARGET=' + tunnel_target) if harbor_env_type == 'modal' else '' }}
           {{ image }}
       when: existing.stdout == ""
       register: run

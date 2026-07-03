@@ -23,6 +23,9 @@ Selected via ``AgentConfig(import_path="capped_mini_swe_agent:CappedMiniSweAgent
 in server.py. Cap is ``MSWEA_MAX_OUTPUT_CHARS`` (default 100000).
 """
 
+import base64
+import os
+
 from harbor.agents.installed.mini_swe_agent import MiniSweAgent
 
 # Python appended verbatim to the installed environments' source. Kept as a raw
@@ -76,9 +79,59 @@ _PATCH_CMD = (
 )
 
 
+# --- optional SSH reverse-reachability tunnel (Modal backend) ---
+# When the task container runs off-host (HARBOR_ENV_TYPE=modal), the agent's
+# model calls must reach the session server on node0, which is NOT publicly
+# exposed. If MILES_TUNNEL_* is configured on the agent server, install() opens
+# an SSH local-forward FROM the task container so localhost:30000 -> node0's
+# session server over port 22 (a restricted, port-forwarding-only key). The
+# agent then targets 127.0.0.1:30000 (set MILES_ROUTER_EXTERNAL_HOST=127.0.0.1
+# on the trainer). No public :30000 is opened. Inert unless MILES_TUNNEL_* set,
+# so the docker backend is unaffected.
+_TUNNEL_LOCAL_PORT = 30000
+
+
+def _tunnel_setup() -> tuple[str, dict[str, str]] | None:
+    """(command, env) to open the tunnel inside the task container, or None.
+
+    Reads config from the agent server's own environment (install() runs in the
+    agent-server process). The key is passed via the exec env (not baked into the
+    command) so it isn't the command string; it's a restricted forward-only key.
+    """
+    key_file = os.getenv("MILES_TUNNEL_KEY_FILE")
+    host = os.getenv("MILES_TUNNEL_HOST")
+    user = os.getenv("MILES_TUNNEL_USER", "mtunnel")
+    target = os.getenv("MILES_TUNNEL_TARGET", "10.0.96.128:30000")
+    if not (key_file and host and os.path.isfile(key_file)):
+        return None
+    with open(key_file, "rb") as f:
+        key_b64 = base64.b64encode(f.read()).decode()
+    cmd = (
+        "set -e; "
+        "command -v ssh >/dev/null 2>&1 || { apt-get update -qq && "
+        "apt-get install -y -qq openssh-client >/dev/null; }; "
+        "umask 077; printf %s \"$MILES_TK\" | base64 -d > /tmp/miles_tunnel_key; "
+        "chmod 600 /tmp/miles_tunnel_key; "
+        "ssh -f -N -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/dev/null "
+        "-o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 "
+        f"-i /tmp/miles_tunnel_key -L {_TUNNEL_LOCAL_PORT}:{target} {user}@{host}; "
+        # block until the forwarded port answers, so the agent never races the tunnel
+        f"for i in $(seq 1 20); do (exec 3<>/dev/tcp/127.0.0.1/{_TUNNEL_LOCAL_PORT}) 2>/dev/null "
+        "&& { echo 'miles: tunnel up'; exit 0; }; sleep 0.5; done; "
+        "echo 'miles: tunnel FAILED to come up' >&2; exit 1"
+    )
+    return cmd, {"MILES_TK": key_b64}
+
+
 class CappedMiniSweAgent(MiniSweAgent):
     """MiniSweAgent that bounds per-command captured output (see module docstring)."""
 
     async def install(self, environment) -> None:
         await super().install(environment)
         await self.exec_as_agent(environment, command=_PATCH_CMD)
+        # Bring up the session-server tunnel first if configured (Modal backend),
+        # so it's ready before the agent makes any model call in run().
+        tunnel = _tunnel_setup()
+        if tunnel is not None:
+            cmd, env = tunnel
+            await self.exec_as_root(environment, command=cmd, env=env)

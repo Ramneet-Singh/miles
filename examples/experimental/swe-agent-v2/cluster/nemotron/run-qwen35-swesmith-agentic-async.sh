@@ -54,6 +54,10 @@ set -euo pipefail
 MILES_ROOT=${MILES_ROOT:-/root/miles}
 MODELS_DIR=${MODELS_DIR:-/cpfs01/models}
 HEAD_IP=${HEAD_IP:-10.0.96.128}
+# Host the sandbox-side agent uses to reach the session server. Private IP for the
+# docker backend; set ROUTER_EXTERNAL_HOST=127.0.0.1 for the Modal SSH-tunnel path
+# (the task container forwards its localhost:30000 -> node0 over ssh).
+ROUTER_EXTERNAL_HOST=${ROUTER_EXTERNAL_HOST:-$HEAD_IP}
 SWE_AGENT_DIR=$MILES_ROOT/examples/experimental/swe-agent-v2
 CKPT_DIR=${CKPT_DIR:-/cpfs01/ckpts/qwen35-swesmith}
 cd "$MILES_ROOT"
@@ -219,7 +223,7 @@ RUNTIME_ENV_JSON="{
     \"WANDB_DIR\": \"/root/wandb\",
     \"AGENT_SERVER_URL\": \"http://$HEAD_IP:11000\",
     \"AGENT_MODEL_NAME\": \"model\",
-    \"MILES_ROUTER_EXTERNAL_HOST\": \"$HEAD_IP\"
+    \"MILES_ROUTER_EXTERNAL_HOST\": \"$ROUTER_EXTERNAL_HOST\"
   }
 }"
 
