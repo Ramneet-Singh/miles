@@ -213,7 +213,12 @@ class Dataset:
             else:
                 output_prompt = prompt
 
-            if processor:
+            # Only take the vision path when the task actually declares multimodal
+            # content. A text-only task (multimodal_keys is None) builds a string
+            # prompt (as_conversation=False above), so a multimodal model's
+            # processor must not force the list/vision path on it — this lets a
+            # multimodal checkpoint be used text-only (e.g. agentic RL).
+            if processor and multimodal_keys is not None:
                 from miles.utils.processing_utils import process_vision_info
 
                 assert isinstance(
