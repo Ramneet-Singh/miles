@@ -114,7 +114,7 @@ def _tunnel_setup() -> tuple[str, dict[str, str]] | None:
         "chmod 600 /tmp/miles_tunnel_key; "
         "ssh -f -N -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/dev/null "
         "-o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 "
-        f"-i /tmp/miles_tunnel_key -L {_TUNNEL_LOCAL_PORT}:{target} {user}@{host}; "
+        f"-i /tmp/miles_tunnel_key -L 127.0.0.1:{_TUNNEL_LOCAL_PORT}:{target} {user}@{host}; "
         # block until the forwarded port answers, so the agent never races the tunnel
         f"for i in $(seq 1 20); do (exec 3<>/dev/tcp/127.0.0.1/{_TUNNEL_LOCAL_PORT}) 2>/dev/null "
         "&& { echo 'miles: tunnel up'; exit 0; }; sleep 0.5; done; "
