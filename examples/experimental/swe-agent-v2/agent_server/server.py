@@ -305,6 +305,17 @@ async def _run_trial(request: RunRequest) -> dict[str, Any]:
         return _error("InvalidInstanceId")
 
     try:
+        env_type = os.getenv("HARBOR_ENV_TYPE", "docker")
+        # Route our Modal sandboxes into a DEDICATED, descriptively-named app
+        # (default qwen-rl-swe-smith) instead of harbor's shared default
+        # "__harbor__": the shared app mixes multiple users' runs, so ours can't
+        # be told apart or safely bulk-terminated. Own app => isolated, findable
+        # on the dashboard, and stoppable without touching anyone else. app_name
+        # is a ModalEnvironment ctor param; harbor spreads EnvironmentConfig.kwargs
+        # into it (factory **config.kwargs). Modal-only; docker ignores it.
+        env_kwargs: dict[str, Any] = {}
+        if env_type == "modal":
+            env_kwargs["app_name"] = os.getenv("HARBOR_MODAL_APP", "qwen-rl-swe-smith")
         config = TrialConfig(
             trials_dir=_trials_dir(),
             # Cap each agent at a fraction of its task's native timeout: tasks
@@ -321,7 +332,8 @@ async def _run_trial(request: RunRequest) -> dict[str, Any]:
                 # [environment].docker_image, so harbor takes the from-Dockerfile
                 # build path on every backend -> the baked bug-checkout layer is
                 # applied (modal would otherwise silently regrade `main`).
-                type=os.getenv("HARBOR_ENV_TYPE", "docker"),
+                type=env_type,
+                kwargs=env_kwargs,
                 delete=os.getenv("HARBOR_DELETE_CONTAINERS", "true").lower() in ("true", "1", "t"),
                 # Raise the per-container memory cap above the task's native
                 # value (TB2 tasks set 2G): the mini-swe-agent setup step peaks

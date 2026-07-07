@@ -51,6 +51,11 @@
     # The proxy is created out-of-band (Modal dashboard); we only name it here, and
     # the Dockerfile's harbor patch forwards it to Sandbox.create via HARBOR_MODAL_PROXY.
     modal_proxy: "rl-training-sandbox"
+    # Dedicated Modal App name for our sandboxes (modal backend only) instead of
+    # harbor's shared "__harbor__" default — isolates + identifies our containers
+    # so they're findable on the dashboard and terminable without touching other
+    # users' runs. Fed to server.py's EnvironmentConfig.kwargs["app_name"].
+    modal_app: "qwen-rl-swe-smith"
     recreate: false
   tasks:
     - name: Remove existing agent_env container (when recreate=true)
@@ -100,7 +105,8 @@
           -e HARBOR_REWARD_KEY={{ harbor_reward_key }}
           -e HARBOR_ENV_TYPE={{ harbor_env_type }}
           {{ ('-v ' + modal_config_file + ':/root/.modal.toml:ro'
-              + ' -e HARBOR_MODAL_PROXY=' + modal_proxy) if harbor_env_type == 'modal' else '' }}
+              + ' -e HARBOR_MODAL_PROXY=' + modal_proxy
+              + ' -e HARBOR_MODAL_APP=' + modal_app) if harbor_env_type == 'modal' else '' }}
           {{ image }}
       when: existing.stdout == ""
       register: run

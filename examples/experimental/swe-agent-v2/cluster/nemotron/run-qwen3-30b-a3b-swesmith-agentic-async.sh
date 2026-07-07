@@ -77,8 +77,10 @@ CKPT_ARGS=(
    --ref-load      $MODELS_DIR/Qwen3-30B-A3B
    --megatron-to-hf-mode bridge
    --save $CKPT_DIR
-   --save-interval 20            # KEEP ALL: 100 updates / 20 = snapshots at iter 20/40/60/80/100 for OFFLINE
-                                 # TB2 eval (do NOT prune). ~5 * ~70 GB weights-only ~= 350 GB; /cpfs01 has TBs.
+   --save-interval 5             # NB: save-interval counts ROLLOUT ITERATIONS (train_async.py keys the save on
+                                 # rollout_id, not optimizer steps). At 4 opt-steps/rollout, 5 rollouts = 20 opt
+                                 # steps, so this saves at rollouts 4/9/14/19/24 = opt-steps 20/40/60/80/100 =
+                                 # 5 evenly-spaced ckpts for OFFLINE TB2 eval (do NOT prune). ~5*~70GB; /cpfs01 has TBs.
    --no-save-optim               # weights-only: we don't resume this run and offline eval only needs weights,
                                  # so skip the ~3x optimizer-state bloat (each save ~70 GB not ~280 GB).
 )
