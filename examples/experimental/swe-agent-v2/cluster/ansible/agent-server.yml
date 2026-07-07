@@ -93,8 +93,14 @@
       ansible.builtin.command:
         # For the modal backend, ~/.modal.toml is mounted read-only so the agent
         # server authenticates to Modal (the file, not the repo, holds the token).
+        # --ulimit nofile: 512 concurrent agents each hold several sockets (session
+        # server + docker exec + Modal control); the default 1024 soft FD limit is
+        # exhausted at that scale -> "OSError: [Errno 24] Too many open files",
+        # accept() fails, agents make no model calls, the pipeline jams. Raise well
+        # above the peak (128->512 concurrency was the trigger).
         cmd: >
           docker run -itd --name agent_env --network host
+          --ulimit nofile=1048576:1048576
           -v /var/run/docker.sock:/var/run/docker.sock
           -v /cpfs01:/cpfs01
           -e HARBOR_TASKS_DIR={{ harbor_tasks_dir }}
