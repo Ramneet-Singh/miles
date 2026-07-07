@@ -1,0 +1,18 @@
+--- a/harbor/environments/modal.py
++++ b/harbor/environments/modal.py
+@@ -1098,6 +1098,15 @@
+         if labels := self._sandbox_labels():
+             kwargs["tags"] = labels
+
++        # miles: attach a Modal Proxy so the sandbox's outbound traffic egresses
++        # from the proxy's static IPs (allowlisted on node0:30000). Set via the
++        # HARBOR_MODAL_PROXY env var; empty/unset -> no proxy attached, so the
++        # docker/local backend and plain (unproxied) Modal use are unaffected.
++        if proxy_name := os.getenv("HARBOR_MODAL_PROXY"):
++            from modal import Proxy
++
++            kwargs["proxy"] = Proxy.from_name(proxy_name)
++
+         return await Sandbox.create.aio(
+             *(entrypoint or ()),
+             app=self._app,

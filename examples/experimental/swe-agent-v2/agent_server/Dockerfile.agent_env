@@ -9,7 +9,7 @@
 FROM python:3.12-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      ca-certificates curl git git-lfs \
+      ca-certificates curl git git-lfs patch \
  && rm -rf /var/lib/apt/lists/* \
  && git lfs install --system || true
 
@@ -31,6 +31,18 @@ RUN mkdir -p /usr/local/lib/docker/cli-plugins \
 # containers off-host. The docker CLI/compose above still serve the default
 # "docker" backend; both are selectable at runtime.
 RUN pip install --no-cache-dir "harbor[modal]==0.15.0" fastapi uvicorn httpx
+
+# harbor 0.15.0 never forwards a Modal Proxy to Sandbox.create, so we add the one
+# kwarg it omits: gated on HARBOR_MODAL_PROXY (empty -> no-op, docker/local path
+# untouched). Applied here rather than monkeypatched at runtime so it is explicit
+# and version-pinned; --forward makes patch fail the build if a future harbor bump
+# moves the context (loud failure beats silent drift). COPY (not BuildKit --mount)
+# because this image builds with DOCKER_BUILDKIT=0 (see header).
+COPY patches/harbor-modal-proxy.patch /tmp/harbor-modal-proxy.patch
+RUN patch --forward "$(python3 -c 'import harbor.environments.modal as m; print(m.__file__)')" \
+      < /tmp/harbor-modal-proxy.patch \
+ && python3 -c "import harbor.environments.modal as m, inspect; assert 'HARBOR_MODAL_PROXY' in inspect.getsource(m.ModalEnvironment._create_sandbox), 'proxy patch did not apply'" \
+ && rm -f /tmp/harbor-modal-proxy.patch
 
 WORKDIR /app
 # /app on the path so harbor's AgentFactory.create_agent_from_import_path can

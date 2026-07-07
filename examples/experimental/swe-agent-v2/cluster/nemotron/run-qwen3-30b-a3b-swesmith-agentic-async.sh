@@ -34,13 +34,13 @@
 #        hf download Qwen/Qwen3-30B-A3B --local-dir /cpfs01/models/Qwen3-30B-A3B
 #      (~60 GB; check `ls /cpfs01/models`.)
 #   1. Ray cluster up (ansible/ray.yml), all 8 nodes.
-#   2. Agent server up on node0 (ansible/agent-server.yml) with the swe-smith
-#      tasks + combined reward:
+#   2. Agent server up on node0 (ansible/agent-server.yml) on the MODAL backend
+#      (harbor_env_type=modal) with the swe-smith tasks + combined reward:
 #        -e harbor_tasks_dir=/cpfs01/swe-smith-tasks/py -e harbor_reward_key=combined
-#      (regenerate the 150 tasks with stage-swesmith-tasks.sh if starting fresh).
-#      NOTE: until the Modal backend swap lands, AGENT_MAX_CONCURRENT stays 16
-#      (node0 docker), so 128/step still runs in ~8 waves — the full throughput
-#      win from the inference-heavy split is realized once Modal lifts that cap.
+#      (regenerate the 500 tasks with stage-swesmith-tasks.sh if starting fresh).
+#      Modal lifts the node0-docker concurrency cap: AGENT_MAX_CONCURRENT=512
+#      (matches the 512 trajectories/rollout below), so a rollout iteration's
+#      512 agentic containers run in one wave — realizing the inference-heavy split.
 #
 # Run INSIDE the node0 miles container (pass the W&B key so it is never committed):
 #   docker exec -e WANDB_API_KEY="$WANDB_API_KEY" miles \
@@ -51,13 +51,17 @@ MILES_ROOT=${MILES_ROOT:-/root/miles}
 MODELS_DIR=${MODELS_DIR:-/cpfs01/models}
 HEAD_IP=${HEAD_IP:-10.0.96.128}
 # Host the sandbox-side agent uses to reach the session server. Private IP for the
-# docker backend; set ROUTER_EXTERNAL_HOST=127.0.0.1 for the Modal SSH-tunnel path
-# (the task container forwards its localhost:30000 -> node0 over ssh).
+# docker backend; set ROUTER_EXTERNAL_HOST=47.74.85.155 (node0's public ingress,
+# port 30000 opened + allowlisted to the rl-training-sandbox Modal proxy's static
+# egress IPs) for the Modal path — the in-sandbox agent dials it directly, no tunnel.
 ROUTER_EXTERNAL_HOST=${ROUTER_EXTERNAL_HOST:-$HEAD_IP}
-# Rollout width / length — env-overridable for smoke tests; defaults are the real
-# 8x16 / 50-step run. Keep GLOBAL_BATCH_SIZE = ROLLOUT_BATCH_SIZE * N_SAMPLES_PER_PROMPT.
-NUM_ROLLOUT=${NUM_ROLLOUT:-50}
-ROLLOUT_BATCH_SIZE=${ROLLOUT_BATCH_SIZE:-8}
+# Rollout width / length — env-overridable for smoke tests. ASYNC DECOUPLING: the
+# fully-async path does NOT require GLOBAL_BATCH_SIZE = ROLLOUT_BATCH_SIZE*N_SAMPLES.
+# Here rollout width (32*16 = 512 concurrent trajectories, matched to Modal's 512
+# cap) exceeds the 128 training batch, so each rollout iteration yields 512/128 = 4
+# optimizer steps. Total gradient updates = NUM_ROLLOUT * 4 = 100 (was 50 at 8x16).
+NUM_ROLLOUT=${NUM_ROLLOUT:-25}
+ROLLOUT_BATCH_SIZE=${ROLLOUT_BATCH_SIZE:-32}
 N_SAMPLES_PER_PROMPT=${N_SAMPLES_PER_PROMPT:-16}
 GLOBAL_BATCH_SIZE=${GLOBAL_BATCH_SIZE:-128}
 SWE_AGENT_DIR=$MILES_ROOT/examples/experimental/swe-agent-v2
@@ -73,24 +77,24 @@ CKPT_ARGS=(
    --ref-load      $MODELS_DIR/Qwen3-30B-A3B
    --megatron-to-hf-mode bridge
    --save $CKPT_DIR
-   --save-interval 10            # /cpfs01 has TBs free; the host-NVME pressure is containers, not ckpts.
-   --no-save-optim               # weights-only: this is a 50-step probe we don't resume, so skip the ~3x
-                                 # optimizer-state bloat (each save ~70 GB not ~280 GB). Keep-latest-only is
-                                 # enforced by a post-save prune of old iter_* dirs in the tracking loop.
+   --save-interval 20            # KEEP ALL: 100 updates / 20 = snapshots at iter 20/40/60/80/100 for OFFLINE
+                                 # TB2 eval (do NOT prune). ~5 * ~70 GB weights-only ~= 350 GB; /cpfs01 has TBs.
+   --no-save-optim               # weights-only: we don't resume this run and offline eval only needs weights,
+                                 # so skip the ~3x optimizer-state bloat (each save ~70 GB not ~280 GB).
 )
 
 ROLLOUT_ARGS=(
    # Fully-async rollout: background worker fills a buffer; trainer drains it.
    --rollout-function-path fully_async_rollout.generate_rollout_fully_async
-   --prompt-data $SWE_AGENT_DIR/cluster/nemotron/swe-smith-py-150.jsonl
+   --prompt-data $SWE_AGENT_DIR/cluster/nemotron/swe-smith-py-500.jsonl
    --input-key prompt --metadata-key metadata   # prompt = task instruction; metadata carries instance_id + agent_name
    --rollout-shuffle
    # No --rm-type / --apply-chat-template: reward comes from the agent server
    # (--custom-rm-path below) and the agent builds its own chat via TITO.
-   --num-rollout $NUM_ROLLOUT              # default 50 (8x16 probe); override NUM_ROLLOUT for smoke
-   --rollout-batch-size $ROLLOUT_BATCH_SIZE        # distinct prompts/step (default 8)
-   --n-samples-per-prompt $N_SAMPLES_PER_PROMPT    # samples/prompt (default 16) -> dense GRPO gradient
-   --global-batch-size $GLOBAL_BATCH_SIZE          # = rollout-batch * n-samples (default 128)
+   --num-rollout $NUM_ROLLOUT              # default 25 rollout iters -> 25*4 = 100 optimizer steps
+   --rollout-batch-size $ROLLOUT_BATCH_SIZE        # distinct prompts/iter (default 32); *n-samples = 512 in flight
+   --n-samples-per-prompt $N_SAMPLES_PER_PROMPT    # GRPO group size (default 16) -> dense GRPO gradient
+   --global-batch-size $GLOBAL_BATCH_SIZE          # training batch (default 128); 512/128 = 4 opt steps/rollout iter
    --rollout-max-response-len 16384  # per-TURN cap raised 8k->16k: Qwen3 emits <think> blocks, so a single
                                      # turn (reasoning + one bash command) is longer than Nemotron's.
    --max-seq-len 40960           # Qwen3-30B-A3B native context (max_position_embeddings=40960). No YaRN needed.
@@ -240,8 +244,8 @@ chmod 600 "$RUNTIME_ENV_FILE"
 printf '%s' "$RUNTIME_ENV_JSON" > "$RUNTIME_ENV_FILE"
 trap 'rm -f "$RUNTIME_ENV_FILE"' EXIT
 
-# Disaggregated, inference-heavy split: 2 training nodes (16 GPU: TP2*PP1*CP2 =>
-# DP4, EP8) + 48 rollout GPUs (48 TP1 engines). No --colocate (async rejects it).
+# Disaggregated, inference-heavy split: 2 training nodes (16 GPU: TP2*PP1*CP4 =>
+# DP2, EP8) + 48 rollout GPUs (48 TP1 engines). No --colocate (async rejects it).
 ray job submit --address="http://127.0.0.1:8265" \
    --runtime-env "$RUNTIME_ENV_FILE" \
    -- python3 train_async.py \

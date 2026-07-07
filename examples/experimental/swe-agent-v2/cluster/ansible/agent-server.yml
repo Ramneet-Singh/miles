@@ -26,8 +26,9 @@
     # Concurrent trials (semaphore in server.py). Keep ~= the rollout's
     # concurrent-trajectory count. The docker backend is bounded by node0
     # RAM/disk (~16); the modal backend runs containers off-host, so it can carry
-    # a full 128-sample step in one wave. Override with -e max_concurrent=N.
-    max_concurrent: "{{ 128 if harbor_env_type == 'modal' else 16 }}"
+    # a full rollout iteration's 512 trajectories (rollout-batch 32 * 16 samples)
+    # in one wave. Override with -e max_concurrent=N.
+    max_concurrent: "{{ 512 if harbor_env_type == 'modal' else 16 }}"
     # Keep per-trial dirs for debugging (default true = delete after each rollout).
     # Override with -e harbor_delete_trials=false to capture failing trajectories.
     harbor_delete_trials: true
@@ -44,14 +45,12 @@
     # Modal credentials file (from `modal token new`), mounted into agent_env only
     # when harbor_env_type=modal. Must exist before the modal run.
     modal_config_file: "{{ lookup('env', 'HOME') }}/.modal.toml"
-    # SSH reverse-reachability tunnel (modal backend only): the task container opens
-    # an SSH -L to node0's session server (not publicly exposed) via the restricted
-    # mtunnel key. Mounted/passed only when harbor_env_type=modal; the key file is
-    # mounted (never committed). See capped_mini_swe_agent.py:_tunnel_setup.
-    tunnel_key_file: "{{ lookup('env', 'HOME') }}/miles-tunnel-key/id_tunnel"
-    tunnel_host: "47.74.85.155"
-    tunnel_user: "mtunnel"
-    tunnel_target: "10.0.96.128:30000"
+    # Modal Proxy (modal backend only): gives sandboxes static egress IPs that are
+    # allowlisted on node0:30000, so the in-sandbox agent reaches the session server
+    # directly (ROUTER_EXTERNAL_HOST=47.74.85.155 on the trainer) — no SSH tunnel.
+    # The proxy is created out-of-band (Modal dashboard); we only name it here, and
+    # the Dockerfile's harbor patch forwards it to Sandbox.create via HARBOR_MODAL_PROXY.
+    modal_proxy: "rl-training-sandbox"
     recreate: false
   tasks:
     - name: Remove existing agent_env container (when recreate=true)
@@ -78,14 +77,11 @@
       register: build
       changed_when: "'Successfully built' in build.stdout"
 
-    - name: Fail early if modal creds / tunnel key are missing (modal backend only)
+    - name: Fail early if modal creds are missing (modal backend only)
       ansible.builtin.stat:
-        path: "{{ item }}"
-      loop:
-        - "{{ modal_config_file }}"
-        - "{{ tunnel_key_file }}"
-      register: modal_files
-      failed_when: harbor_env_type == 'modal' and not modal_files.stat.exists
+        path: "{{ modal_config_file }}"
+      register: modal_creds
+      failed_when: harbor_env_type == 'modal' and not modal_creds.stat.exists
       when: existing.stdout == ""
 
     - name: Run the agent_env container
@@ -103,12 +99,8 @@
           -e HARBOR_DELETE_TRIALS={{ harbor_delete_trials | string | lower }}
           -e HARBOR_REWARD_KEY={{ harbor_reward_key }}
           -e HARBOR_ENV_TYPE={{ harbor_env_type }}
-          {{ ('-v ' + modal_config_file + ':/root/.modal.toml:ro') if harbor_env_type == 'modal' else '' }}
-          {{ ('-v ' + tunnel_key_file + ':/root/miles-tunnel-key:ro'
-              + ' -e MILES_TUNNEL_KEY_FILE=/root/miles-tunnel-key'
-              + ' -e MILES_TUNNEL_HOST=' + tunnel_host
-              + ' -e MILES_TUNNEL_USER=' + tunnel_user
-              + ' -e MILES_TUNNEL_TARGET=' + tunnel_target) if harbor_env_type == 'modal' else '' }}
+          {{ ('-v ' + modal_config_file + ':/root/.modal.toml:ro'
+              + ' -e HARBOR_MODAL_PROXY=' + modal_proxy) if harbor_env_type == 'modal' else '' }}
           {{ image }}
       when: existing.stdout == ""
       register: run
