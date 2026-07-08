@@ -28,6 +28,18 @@ def log_eval_rollout_data(rollout_id, args, data, extra_metrics: dict[str, Any] 
     log_dict = extra_metrics or {}
     for key in data.keys():
         rewards = data[key]["rewards"]
+        # An eval sample can return a None reward when its trajectory aborts/errors
+        # with no verifier score (common in agentic eval on Modal). Count that as 0
+        # (the task was not solved) instead of crashing the mean on float + None.
+        # Training never hits this — its dynamic-sampling filter drops such samples;
+        # eval has no filter.
+        n_none = sum(r is None for r in rewards)
+        if n_none:
+            logger.warning(
+                f"eval/{key}: {n_none}/{len(rewards)} samples had no reward "
+                "(aborted/errored) -> counted as 0.0"
+            )
+        rewards = [0.0 if r is None else r for r in rewards]
         log_dict[f"eval/{key}"] = sum(rewards) / len(rewards)
         if (samples := data[key].get("samples")) is not None:
             log_dict |= dict_add_prefix(_compute_metrics_from_samples(args, samples), f"eval/{key}/")
